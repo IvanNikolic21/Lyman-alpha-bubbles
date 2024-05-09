@@ -5,7 +5,9 @@ from astropy import units as u
 from astropy import constants as const
 from venv.helpers import z_at_proper_distance, I, comoving_distance_from_source_Mpc
 from venv.igm_prop import tau_wv
+from venv.save import HdF5Saver
 from joblib import Parallel, delayed
+import datetime
 from astropy.cosmology import Planck18 as Cosmo
 
 wave_em = np.linspace(1214, 1225., 100) * u.Angstrom
@@ -74,6 +76,9 @@ class OutsideContainer:
 def get_content(
         Muvs,
         redshifts_of_mocks,
+        x_gal_position,
+        y_gal_position,
+        z_gal_position,
         beta=None,
         n_iter_bub=20,
         n_inside_tau=1000,
@@ -83,6 +88,8 @@ def get_content(
         xh_unc=False,
         high_prob_emit=False,
         EW_fixed=False,
+        cache=True,
+        cache_dir='/home/inikolic/projects/Lyalpha_bubbles/_cache/',
 ):
     """
         Function fills up the container which has all of the forward model parts
@@ -96,6 +103,15 @@ def get_content(
         the likelihood code and that can be calculated once. First thing that
         comes to mind is the comoving distance factor.
     """
+    if type(n_iter_bub) is tuple:
+        n_iter_bub = n_iter_bub[0]
+    if type(n_inside_tau) is tuple:
+        n_inside_tau = n_inside_tau[0]
+
+    if cache:
+        dir_name = 'dir_' + str(
+            datetime.datetime.now().date()
+        ) + '_' + str(n_iter_bub) + '_' + str(n_inside_tau) + '/'
 
     cont_now = OutsideContainer()
 
@@ -213,14 +229,73 @@ def get_content(
     ) for (muv_i, beti, redi) in zip(Muvs, beta, redshifts_of_mocks))
 
     for index_gal in range(len(Muvs)):
+
+        if cache:
+            dict_gal = {
+                'redshift': redshifts_of_mocks[index_gal],
+                'x_galaxy_position': x_gal_position[index_gal],
+                'y_galaxy_position': y_gal_position[index_gal],
+                'z_galaxy_position': z_gal_position[index_gal],
+                'Muv': Muvs[index_gal],
+                'beta': beta[index_gal],
+                'n_iter_bub': n_iter_bub,
+                'n_inside_tau': n_inside_tau,
+            }
+
+            try:
+                save_cl = HdF5Saver(
+                    x_gal=x_gal_position[index_gal],
+                    n_iter_bub=n_iter_bub,
+                    n_inside_tau=n_inside_tau,
+                    output_dir=cache_dir + '/' + dir_name,
+                )
+            except IndexError:
+                save_cl = HdF5Saver(
+                    x_gal=x_gal_position[index_gal],
+                    n_iter_bub=n_iter_bub,
+                    n_inside_tau=n_inside_tau,
+                    output_dir=cache_dir + '/' + dir_name,
+                )
+                print(
+                    "Beware, something weird happened with outside bubble",
+                )
+            save_cl.save_attrs(dict_gal)
+            max_len = np.max(
+                [len(a) for a in outputs[index_gal][2]])
+            x_bubs_arr = np.zeros(
+                (len(outputs[index_gal][2]), max_len))
+            y_bubs_arr = np.zeros(
+                (len(outputs[index_gal][2]), max_len))
+            z_bubs_arr = np.zeros(
+                (len(outputs[index_gal][2]), max_len))
+            r_bubs_arr = np.zeros(
+                (len(outputs[index_gal][2]), max_len))
+            for i_bub, (xar, yar, zar, rar) in enumerate(
+                    zip(
+                        outputs[index_gal][2],
+                        outputs[index_gal][3],
+                        outputs[index_gal][4],
+                        outputs[index_gal][5],
+                    )
+            ):
+                x_bubs_arr[i_bub, :len(xar)] = xar
+                y_bubs_arr[i_bub, :len(xar)] = yar
+                z_bubs_arr[i_bub, :len(xar)] = zar
+                r_bubs_arr[i_bub, :len(xar)] = rar
+            dict_dat = {
+                #'one_Js': np.array(outputs[index_gal][0]),
+                #'xHs': np.array(outputs[index_gal][1]),
+                'x_bubs_arr': x_bubs_arr,
+                'y_bubs_arr': y_bubs_arr,
+                'z_bubs_arr': z_bubs_arr,
+                'r_bubs_arr': r_bubs_arr,
+                #'tau_prec': np.array(outputs[index_gal][7]),
+                #'Lyman_alpha_iter': np.array(outputs[index_gal][6]),
+            }
+            save_cl.save_datasets(dict_dat)
+            save_cl.close_file()
+
         cont_now.add_j_s(outputs[index_gal][0])
-        cont_now.add_xhs(outputs[index_gal][1])
-        cont_now.add_out_bubble(
-            outputs[index_gal][2],
-            outputs[index_gal][3],
-            outputs[index_gal][4],
-            outputs[index_gal][5],
-        )
         cont_now.add_la_flux(
             outputs[index_gal][6]
         )
