@@ -18,7 +18,7 @@ from joblib import Parallel, delayed
 from venv.galaxy_prop import get_js, get_mock_data, p_EW
 from venv.galaxy_prop import get_muv, tau_CGM, calculate_number
 
-from venv.save import HdF5Saver, HdF5SaverAft
+from venv.save import HdF5Saver, HdF5SaverAft, HdF5SaveMocks
 from venv.helpers import z_at_proper_distance, full_res_flux, perturb_flux
 from venv.speed_up import get_content, calculate_taus_post
 
@@ -54,7 +54,7 @@ def _get_likelihood(
         cont_filled=None,
         index_iter=None,
         constrained_prior=False,
-        reds_of_galaxies=None
+        reds_of_galaxies=None,
         dir_name=None,
 ):
     """
@@ -264,7 +264,7 @@ def _get_likelihood(
                                          ],
                 wave_em.value
             )
-            del tau_cgm_gal_in
+
             del tau_now_i
 
 
@@ -388,7 +388,7 @@ def _get_likelihood(
                 dict_dat_aft
             )
 
-            names_used.append(save_cl.f_name)
+            names_used_this_iter.append(save_cl.f_name)
             save_cl.close()
             del save_cl, dict_dat_aft
         flux_tot.append(np.array(flux_now).flatten())
@@ -853,7 +853,7 @@ if __name__ == '__main__':
     parser.add_argument("--resolution_worsening", type=float, default=1)
     parser.add_argument("--n_inside_tau", type=int, default=50)
     parser.add_argument("--n_iter_bub", type=int, default=50)
-    parser.add_argument("--bins_tot", type=int, default=15)
+    parser.add_argument("--bins_tot", type=int, default=20)
     parser.add_argument("--high_prob_emit", action="store_true")
     parser.add_argument("--cache", action="store_false")
     parser.add_argument("--fwhm_true", action="store_true")
@@ -1025,99 +1025,131 @@ if __name__ == '__main__':
         data = np.array(tau_data_I)
 
     else:
-        data = np.load(
-            '/home/inikolic/projects/Lyalpha_bubbles/code/'
-            + inputs.mock_direc
-            + '/tau_data.npy'  # maybe I'll change this
-        )[:n_gal]
-        xd = np.load(
-            '/home/inikolic/projects/Lyalpha_bubbles/code/'
-            + inputs.mock_direc
-            + '/x_gal_mock.npy'
-        )[:n_gal]
-        yd = np.load(
-            '/home/inikolic/projects/Lyalpha_bubbles/code/'
-            + inputs.mock_direc
-            + '/y_gal_mock.npy'
-        )[:n_gal]
-        zd = np.load(
-            '/home/inikolic/projects/Lyalpha_bubbles/code/'
-            + inputs.mock_direc
-            + '/z_gal_mock.npy'
-        )[:n_gal]
-        x_b = np.load(
-            '/home/inikolic/projects/Lyalpha_bubbles/code/'
-            + inputs.mock_direc
-            + '/x_bub_mock.npy'
-        )
-        y_b = np.load(
-            '/home/inikolic/projects/Lyalpha_bubbles/code/'
-            + inputs.mock_direc
-            + '/y_bub_mock.npy'
-        )
-        z_b = np.load(
-            '/home/inikolic/projects/Lyalpha_bubbles/code/'
-            + inputs.mock_direc
-            + '/z_bub_mock.npy'
-        )
-        r_bubs = np.load(
-            '/home/inikolic/projects/Lyalpha_bubbles/code/'
-            + inputs.mock_direc
-            + '/r_bubs_mock.npy'
-        )
 
-        if os.path.isfile(
-                '/home/inikolic/projects/Lyalpha_bubbles/code/'
-                + inputs.mock_direc
-                + '/tau_shape.npy'
-        ):
-            td = np.load(
-                '/home/inikolic/projects/Lyalpha_bubbles/code/'
-                + inputs.mock_direc
-                + '/tau_shape.npy'
-            )[:n_gal]
-        if os.path.isfile(
-                '/home/inikolic/projects/Lyalpha_bubbles/code/'
-                + inputs.mock_direc
-                + '/Muvs.npy'
-        ):
-            Muv = np.load(
-                '/home/inikolic/projects/Lyalpha_bubbles/code/'
-                + inputs.mock_direc
-                + '/Muvs.npy'
-            )[:n_gal]
-        if os.path.isfile(
-                '/home/inikolic/projects/Lyalpha_bubbles/code/'
-                + inputs.mock_direc
-                + '/one_J.npy'
-        ):
-            one_J = np.load(
-                '/home/inikolic/projects/Lyalpha_bubbles/code/'
-                + inputs.mock_direc
-                + '/one_J.npy'
-            )[:n_gal]
-        if os.path.isfile(
-                '/home/inikolic/projects/Lyalpha_bubbles/code/'
-                + inputs.mock_direc
-                + '/la_e_in.npy'
-        ):
-            la_e = np.load(
-                '/home/inikolic/projects/Lyalpha_bubbles/code/'
-                + inputs.mock_direc
-                + '/la_e_in.npy'
-            )[:n_gal]
-        if os.path.isfile(
-                '/home/inikolic/projects/Lyalpha_bubbles/code/'
-                + inputs.mock_direc
-                + '/flux_spectrum.npy'
-        ):
-            flux_spectrum_mock = np.load(
-                '/home/inikolic/projects/Lyalpha_bubbles/code/'
-                + inputs.mock_direc
-                + '/flux_spectrum.npy'
-            )
+        cl_load = HdF5SaveMocks(
+            n_gal,
+            inputs.n_iter_bub,
+            inputs.n_inside_tau,
+            inputs.mock_direc,
+            write=False
+        )
+        # data = np.load(
+        #     '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #     + inputs.mock_direc
+        #     + '/tau_data.npy'  # maybe I'll change this
+        # )[:n_gal]
+        data = np.array(cl_load.f['integrated_tau'])
+        xd = np.array(cl_load.f['x_gal_mock'])
+        yd = np.array(cl_load.f['y_gal_mock'])
+        zd = np.array(cl_load.f['z_gal_mock'])
+        x_b = np.array(cl_load.f['x_bub_mock'])
+        y_b = np.array(cl_load.f['y_bub_mock'])
+        z_b = np.array(cl_load.f['z_bub_mock'])
+        r_bubs = np.array(cl_load.f['r_bub_mock'])
+        td = np.array(cl_load.f['full_tau'])
+        Muv = np.array(cl_load.f['Muvs'])
+        if inputs.multiple_iter:
+            one_J_arr = np.array(cl_load.f['Lyman_alpha_J'])
         else:
-            flux_spectrum_mock = None
+            one_J = np.array(cl_load.f['Lyman_alpha_J'])
+        la_e = np.array(cl_load.f['Lyman_alpha_lums'])
+        flux_spectrum_mock = np.array(cl_load.f['flux_spectrum'])
+        flux_tau = np.array(cl_load.f['flux_integrated'])
+        cl_load.close_file()
+        redshifts_of_mocks = np.zeros(n_gal)
+        for i in range(n_gal):
+            red_s = z_at_proper_distance(
+                - zd[i] / (1 + inputs.redshift) * u.Mpc, inputs.redshift
+            )
+            redshifts_of_mocks[i] = red_s
+        # xd = np.load(
+        #     '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #     + inputs.mock_direc
+        #     + '/x_gal_mock.npy'
+        # )[:n_gal]
+        # yd = np.load(
+        #     '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #     + inputs.mock_direc
+        #     + '/y_gal_mock.npy'
+        # )[:n_gal]
+        # zd = np.load(
+        #     '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #     + inputs.mock_direc
+        #     + '/z_gal_mock.npy'
+        # )[:n_gal]
+        # x_b = np.load(
+        #     '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #     + inputs.mock_direc
+        #     + '/x_bub_mock.npy'
+        # )
+        # y_b = np.load(
+        #     '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #     + inputs.mock_direc
+        #     + '/y_bub_mock.npy'
+        # )
+        # z_b = np.load(
+        #     '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #     + inputs.mock_direc
+        #     + '/z_bub_mock.npy'
+        # )
+        # r_bubs = np.load(
+        #     '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #     + inputs.mock_direc
+        #     + '/r_bubs_mock.npy'
+        # )
+        #
+        # if os.path.isfile(
+        #         '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #         + inputs.mock_direc
+        #         + '/tau_shape.npy'
+        # ):
+        #     td = np.load(
+        #         '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #         + inputs.mock_direc
+        #         + '/tau_shape.npy'
+        #     )[:n_gal]
+        # if os.path.isfile(
+        #         '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #         + inputs.mock_direc
+        #         + '/Muvs.npy'
+        # ):
+        #     Muv = np.load(
+        #         '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #         + inputs.mock_direc
+        #         + '/Muvs.npy'
+        #     )[:n_gal]
+        # if os.path.isfile(
+        #         '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #         + inputs.mock_direc
+        #         + '/one_J.npy'
+        # ):
+        #     one_J = np.load(
+        #         '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #         + inputs.mock_direc
+        #         + '/one_J.npy'
+        #     )[:n_gal]
+        # if os.path.isfile(
+        #         '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #         + inputs.mock_direc
+        #         + '/la_e_in.npy'
+        # ):
+        #     la_e = np.load(
+        #         '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #         + inputs.mock_direc
+        #         + '/la_e_in.npy'
+        #     )[:n_gal]
+        # if os.path.isfile(
+        #         '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #         + inputs.mock_direc
+        #         + '/flux_spectrum.npy'
+        # ):
+        #     flux_spectrum_mock = np.load(
+        #         '/home/inikolic/projects/Lyalpha_bubbles/code/'
+        #         + inputs.mock_direc
+        #         + '/flux_spectrum.npy'
+        #     )
+        # else:
+        #     flux_spectrum_mock = None
     # print(tau_data_I, np.shape(tau_data_I))
     # print(np.array(data), np.shape(np.array(data)))
     # assert False
@@ -1209,65 +1241,68 @@ if __name__ == '__main__':
                 flux_noise_mock = flux_spectrum_mock
 
         else:
-            if inputs.multiple_iter:
-                flux_noise_mock = np.zeros(
-                    (
-                        inputs.multiple_iter,
-                        n_gal,
-                        inputs.bins_tot - 1,
-                        inputs.bins_tot - 1)
-                )
-                one_J = one_J_arr[0]
-                continuum = (
-                        la_e[:, :, np.newaxis] * one_J * np.exp(-td) * tau_CGM(
-                    Muv) / (
-                                4 * np.pi * Cosmo.luminosity_distance(
-                            7.5
-                        ).to(u.cm).value ** 2)
-                )
-                full_flux_res = full_res_flux(continuum, inputs.redshift)
-                full_flux_res += np.random.normal(
-                    0,
-                    inputs.noise_on_the_spectrum,
-                    np.shape(full_flux_res)
-                )
-                for bin_i, wav_dig_i in zip(
-                        range(2, inputs.bins_tot - 1), wave_em_dig_arr
-                ):
-                    flux_noise_mock[:,:, bin_i - 1, :bin_i] = perturb_flux(
-                        full_flux_res, bin_i
+            if inputs.mock_direc is None:
+                if inputs.multiple_iter:
+                    flux_noise_mock = np.zeros(
+                        (
+                            inputs.multiple_iter,
+                            n_gal,
+                            inputs.bins_tot - 1,
+                            inputs.bins_tot - 1)
                     )
+                    one_J = one_J_arr[0]
+                    continuum = (
+                            la_e[:, :, np.newaxis] * one_J * np.exp(-td) * tau_CGM(
+                        Muv) / (
+                                    4 * np.pi * Cosmo.luminosity_distance(
+                                7.5
+                            ).to(u.cm).value ** 2)
+                    )
+                    full_flux_res = full_res_flux(continuum, inputs.redshift)
+                    full_flux_res += np.random.normal(
+                        0,
+                        inputs.noise_on_the_spectrum,
+                        np.shape(full_flux_res)
+                    )
+                    for bin_i, wav_dig_i in zip(
+                            range(2, inputs.bins_tot - 1), wave_em_dig_arr
+                    ):
+                        flux_noise_mock[:,:, bin_i - 1, :bin_i] = perturb_flux(
+                            full_flux_res, bin_i
+                        )
+                else:
+                    flux_noise_mock = np.zeros(
+                        (
+                            n_gal,
+                            inputs.bins_tot - 1,
+                            inputs.bins_tot - 1)
+                    )
+                    one_J = one_J[0]
+                    # print(np.shape(la_e[:, np.newaxis] * one_J[:n_gal,:]), np.shape(td), np.shape(tau_CGM(
+                    #     Muv)))
+                    continuum = (
+                            la_e[:, np.newaxis] * one_J[:n_gal,:] * np.exp(-td) * tau_CGM(
+                        Muv) / (
+                                    4 * np.pi * Cosmo.luminosity_distance(
+                                7.5
+                            ).to(u.cm).value ** 2)
+                    )
+
+                    full_flux_res = full_res_flux(continuum, inputs.redshift)
+
+                    full_flux_res += np.random.normal(
+                        0,
+                        inputs.noise_on_the_spectrum,
+                        np.shape(full_flux_res)
+                    )
+                    for bin_i, wav_dig_i in zip(
+                            range(2, inputs.bins_tot), wave_em_dig_arr
+                    ):
+                        flux_noise_mock[:,  bin_i - 1, :bin_i] = perturb_flux(
+                            full_flux_res, bin_i
+                        )
             else:
-                flux_noise_mock = np.zeros(
-                    (
-                        n_gal,
-                        inputs.bins_tot - 1,
-                        inputs.bins_tot - 1)
-                )
-                one_J = one_J[0]
-                # print(np.shape(la_e[:, np.newaxis] * one_J[:n_gal,:]), np.shape(td), np.shape(tau_CGM(
-                #     Muv)))
-                continuum = (
-                        la_e[:, np.newaxis] * one_J[:n_gal,:] * np.exp(-td) * tau_CGM(
-                    Muv) / (
-                                4 * np.pi * Cosmo.luminosity_distance(
-                            7.5
-                        ).to(u.cm).value ** 2)
-                )
-
-                full_flux_res = full_res_flux(continuum, inputs.redshift)
-
-                full_flux_res += np.random.normal(
-                    0,
-                    inputs.noise_on_the_spectrum,
-                    np.shape(full_flux_res)
-                )
-                for bin_i, wav_dig_i in zip(
-                        range(2, inputs.bins_tot), wave_em_dig_arr
-                ):
-                    flux_noise_mock[:,  bin_i - 1, :bin_i] = perturb_flux(
-                        full_flux_res, bin_i
-                    )
+                flux_noise_mock = flux_spectrum_mock
 
     # assert False
     if inputs.like_on_flux:
@@ -1276,12 +1311,13 @@ if __name__ == '__main__':
         like_on_flux = False
 
     # from now flux is calculated here in the integrated version, and it contains noise
-    flux_mock = la_e / (
-            4 * np.pi * Cosmo.luminosity_distance(
-        7.5).to(u.cm).value ** 2
-    )
-    flux_tau = flux_mock * tau_data_I
-    flux_tau += np.random.normal(0, 5e-20, np.shape(flux_tau))
+    if inputs.mock_direc is None:
+        flux_mock = la_e / (
+                4 * np.pi * Cosmo.luminosity_distance(
+            7.5).to(u.cm).value ** 2
+        )
+        flux_tau = flux_mock * tau_data_I
+        flux_tau += np.random.normal(0, 5e-20, np.shape(flux_tau))
 
     #Next part sets up mocks that are going to be necessary for the likelihood
     #calculation. This is the new idea on how to speed up the calculation,
@@ -1301,6 +1337,7 @@ if __name__ == '__main__':
         xh_unc=inputs.xH_unc,
         high_prob_emit=inputs.high_prob_emit,
         EW_fixed=inputs.EW_fixed,
+        cache=inputs.cache,
     )
 
     likelihoods, names_used = sample_bubbles_grid(
@@ -1312,7 +1349,6 @@ if __name__ == '__main__':
         n_grid=inputs.n_grid,
         redshift=inputs.redshift,
         muv=Muv,
-        include_muv_unc=inputs.mag_unc,
         beta_data=beta,
         la_e=la_e,
         flux_int=flux_tau,
@@ -1328,36 +1364,46 @@ if __name__ == '__main__':
         cont_filled=cont_filled,
         redshifts_of_mocks=redshifts_of_mocks,
     )
+
+    dict_to_save_data = dict()
     if isinstance(likelihoods, tuple):
-        np.save(
-            inputs.save_dir + '/likelihoods_tau.npy',
-            likelihoods[0]
-        )
-        np.save(
-            inputs.save_dir + '/likelihoods_int.npy',
-            likelihoods[1]
-        )
-        np.save(
-            inputs.save_dir + '/likelihoods_spec.npy',
-            likelihoods[2]
-        )
+        # np.save(
+        #     inputs.save_dir + '/likelihoods_tau.npy',
+        #     likelihoods[0]
+        # )
+        # np.save(
+        #     inputs.save_dir + '/likelihoods_int.npy',
+        #     likelihoods[1]
+        # )
+        # np.save(
+        #     inputs.save_dir + '/likelihoods_spec.npy',
+        #     likelihoods[2]
+        # )
+        dict_to_save_data['likelihoods_tau'] = likelihoods[0]
+        dict_to_save_data['likelihoods_int'] = likelihoods[1]
+        dict_to_save_data['likelihoods_spec'] = likelihoods[2]
     else:
-        np.save(
-            inputs.save_dir + '/likelihoods.npy',
-            likelihoods
-        )
-    np.save(
-        inputs.save_dir + '/x_gal_mock.npy',
-        np.array(xd)
-    )
-    np.save(
-        inputs.save_dir + '/y_gal_mock.npy',
-        np.array(yd)
-    )
-    np.save(
-        inputs.save_dir + '/z_gal_mock.npy',
-        np.array(zd)
-    )
+        # np.save(
+        #     inputs.save_dir + '/likelihoods.npy',
+        #     likelihoods
+        # )
+        dict_to_save_data['likelihoods'] = likelihoods
+    # np.save(
+    #     inputs.save_dir + '/x_gal_mock.npy',
+    #     np.array(xd)
+    # )
+    # np.save(
+    #     inputs.save_dir + '/y_gal_mock.npy',
+    #     np.array(yd)
+    # )
+    # np.save(
+    #     inputs.save_dir + '/z_gal_mock.npy',
+    #     np.array(zd)
+    # )
+    dict_to_save_data['x_gal_mock'] = np.array(xd)
+    dict_to_save_data['y_gal_mock'] = np.array(xd)
+    dict_to_save_data['z_gal_mock'] = np.array(xd)
+
     if inputs.multiple_iter:
         max_len_bubs = 0
         for xbi in x_b:
@@ -1379,76 +1425,100 @@ if __name__ == '__main__':
         y_b_arr = np.array(y_b)
         z_b_arr = np.array(z_b)
         r_b_arr = np.array(r_bubs)
-    print("Where am I saving?")
-    print(inputs.save_dir + '/x_bub_mock.npy')
-    np.save(
-        inputs.save_dir + '/x_bub_mock.npy',
-        np.array(x_b_arr)
-    )
-    np.save(
-        inputs.save_dir + '/y_bub_mock.npy',
-        np.array(y_b_arr)
-    )
-    np.save(
-        inputs.save_dir + '/z_bub_mock.npy',
-        np.array(z_b_arr)
-    )
-    np.save(
-        inputs.save_dir + '/r_bubs_mock.npy',
-        np.array(r_b_arr)
-    )
-    np.save(
-        inputs.save_dir + '/data.npy',
-        np.array(data),
-    )
-    if inputs.multiple_iter:
-        np.save(
-            inputs.save_dir + '/one_J.npy',
-            np.array(one_J_arr),
-        )
-    else:
-        np.save(
-            inputs.save_dir + '/one_J.npy',
-            np.array(one_J),
-        )
-    np.save(
-        inputs.save_dir + '/Muvs.npy',
-        np.array(Muv),
-    )
-    np.save(
-        inputs.save_dir + '/la_e_in.npy',
-        np.array(la_e),
-    )
-    np.save(
-        inputs.save_dir + '/td.npy',
-        np.array(td),
-    )
-    flux_to_save = np.zeros(len(Muv.flatten()))
-    for i, (xdi, ydi, zdi, tdi, li) in enumerate(zip(
-            xd.flatten(), yd.flatten(), zd.flatten(), data.flatten(),
-            la_e.flatten()
-    )):
-        red_s = z_at_value(
-            Cosmo.comoving_distance,
-            Cosmo.comoving_distance(inputs.redshift) + zdi * u.Mpc,
-            ztol=0.00005
-        )
 
-        # calculating fluxes if they are given
-        if la_e is not None:
-            flux_to_save[i] = li / (
-                    4 * np.pi * Cosmo.luminosity_distance(
-                red_s).to(u.cm).value ** 2
-            )
-    np.save(
-        inputs.save_dir + '/flux_data.npy',
-        np.array(flux_to_save.reshape(np.shape(Muv)))
-    )
+    # np.save(
+    #     inputs.save_dir + '/x_bub_mock.npy',
+    #     np.array(x_b_arr)
+    # )
+    # np.save(
+    #     inputs.save_dir + '/y_bub_mock.npy',
+    #     np.array(y_b_arr)
+    # )
+    # np.save(
+    #     inputs.save_dir + '/z_bub_mock.npy',
+    #     np.array(z_b_arr)
+    # )
+    # np.save(
+    #     inputs.save_dir + '/r_bubs_mock.npy',
+    #     np.array(r_b_arr)
+    # )
+    # np.save(
+    #     inputs.save_dir + '/data.npy',
+    #     np.array(data),
+    # )
+
+    dict_to_save_data['x_bub_mock'] = np.array(x_b_arr)
+    dict_to_save_data['y_bub_mock'] = np.array(y_b_arr)
+    dict_to_save_data['z_bub_mock'] = np.array(z_b_arr)
+    dict_to_save_data['r_bub_mock'] = np.array(r_b_arr)
+    dict_to_save_data['integrated_tau'] = np.array(data)
+
+    if inputs.multiple_iter:
+        # np.save(
+        #     inputs.save_dir + '/one_J.npy',
+        #     np.array(one_J_arr),
+        # )
+        dict_to_save_data['Lyman_alpha_J'] = np.array(one_J_arr)
+    else:
+        # np.save(
+        #     inputs.save_dir + '/one_J.npy',
+        #     np.array(one_J),
+        # )
+        dict_to_save_data['Lyman_alpha_J'] = np.array(one_J)
+
+    # np.save(
+    #     inputs.save_dir + '/Muvs.npy',
+    #     np.array(Muv),
+    # )
+    # np.save(
+    #     inputs.save_dir + '/la_e_in.npy',
+    #     np.array(la_e),
+    # )
+    # np.save(
+    #     inputs.save_dir + '/td.npy',
+    #     np.array(td),
+    # )
+    dict_to_save_data['Muvs'] = np.array(Muv)
+    dict_to_save_data['Lyman_alpha_lums'] = np.array(la_e)
+    dict_to_save_data['full_tau'] = np.array(td)
+
+    # flux_to_save = np.zeros(len(Muv.flatten()))
+    # for i, (xdi, ydi, zdi, tdi, li) in enumerate(zip(
+    #         xd.flatten(), yd.flatten(), zd.flatten(), data.flatten(),
+    #         la_e.flatten()
+    # )):
+    #     red_s = z_at_value(
+    #         Cosmo.comoving_distance,
+    #         Cosmo.comoving_distance(inputs.redshift) + zdi * u.Mpc,
+    #         ztol=0.00005
+    #     )
+    #
+    #     # calculating fluxes if they are given
+    #     if la_e is not None:
+    #         flux_to_save[i] = li / (
+    #                 4 * np.pi * Cosmo.luminosity_distance(
+    #             red_s).to(u.cm).value ** 2
+    #         )
+    # np.save(
+    #     inputs.save_dir + '/flux_data.npy',
+    #     np.array(flux_to_save.reshape(np.shape(Muv)))
+    # )
+    dict_to_save_data['flux_integrated'] = np.array(flux_tau)
     if inputs.like_on_flux:
-        np.save(
-            inputs.save_dir + '/flux_spectrum.npy',
-            np.array(like_on_flux)
-        )
+        # np.save(
+        #     inputs.save_dir + '/flux_spectrum.npy',
+        #     np.array(like_on_flux)
+        # )
+        dict_to_save_data['flux_spectrum'] = np.array(like_on_flux)
+
+    cl_save = HdF5SaveMocks(
+        n_gal,
+        inputs.n_iter_bub,
+        inputs.n_inside_tau,
+        inputs.save_dir
+    )
+    cl_save.save_datasets(dict_to_save_data)
+    cl_save.close_file()
     if inputs.cache:
         with open(inputs.save_dir + '/names_done.txt', 'w') as f:
             for line in names_used:

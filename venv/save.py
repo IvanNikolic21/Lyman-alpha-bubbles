@@ -137,5 +137,43 @@ class HdF5SaverAft:
                 dtype="float",
                 data=val
             )
+
     def close(self):
+        self.f.close()
+
+
+class HdF5SaveMocks:
+    def __init__(
+            self,
+            n_gal,
+            n_iter_bub,
+            n_inside_tau,
+            save_dir,
+            write=True
+    ):
+        self.n_gal = n_gal
+        self.n_iter_bub = n_iter_bub
+        self.n_inside_tau = n_inside_tau
+        self.save_dir = save_dir
+        self.f_name = self.save_dir + "Init_ngal" + str(
+            self.n_gal) + "_nib" + str(
+            self.n_iter_bub) + "_nit" + str(
+            self.n_inside_tau) + ".hdf5"
+        self.__create__(write=write)
+
+    def __create__(self, write=True):
+        if write:
+            self.f = h5py.File(self.f_name, 'a')
+        else:
+            self.f = h5py.File(self.f_name, 'r')
+
+    def save_datasets(self, dict_dat):
+        for (nam, val) in dict_dat.items():
+            self.f.create_dataset(
+                nam,
+                dtype="float",
+                data=val
+            )
+
+    def close_file(self):
         self.f.close()
