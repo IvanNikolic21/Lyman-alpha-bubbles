@@ -1,5 +1,5 @@
 import numpy as np
-from venv.galaxy_prop import get_js, p_EW
+from venv.galaxy_prop import get_js, p_EW, L_intr_AH22
 from venv.igm_prop import get_xH, get_bubbles
 from astropy import units as u
 from astropy import constants as const
@@ -89,6 +89,7 @@ def get_content(
         high_prob_emit=False,
         EW_fixed=False,
         cache=True,
+        AH22_model=False,
         cache_dir='/home/inikolic/projects/Lyalpha_bubbles/_cache/',
 ):
     """
@@ -115,11 +116,11 @@ def get_content(
 
     cont_now = OutsideContainer()
 
-    com_factor = np.zeros(len(Muvs))
-    for index_gal in range(len(Muvs)):
+    com_factor = np.zeros(len(Muvs.flatten()))
+    for index_gal in range(len(Muvs.flatten())):
         com_factor[index_gal] = 1 / (4 * np.pi * Cosmo.luminosity_distance(
-            redshifts_of_mocks[index_gal]).to(u.cm).value ** 2)
-    cont_now.add_com_fact(com_factor)
+            redshifts_of_mocks.flatten()[index_gal]).to(u.cm).value ** 2)
+    cont_now.add_com_fact(com_factor.reshape(np.shape(Muvs)))
 
     if beta is None:
         beta = np.array([-2.0] * len(Muvs))
@@ -162,14 +163,19 @@ def get_content(
             y_out_gal_i.append(y_outs)
             z_out_gal_i.append(z_outs)
             r_out_gal_i.append(r_bubs)
-            lae_now_i = np.array(
-                [p_EW(
-                    muv_i,
-                    beti,
-                    high_prob_emit=high_prob_emit,
-                    EW_fixed=EW_fixed,
-                )[1] for blah in range(n_inside_tau)]
-            )
+            if not AH22_model:
+                lae_now_i = np.array(
+                    [p_EW(
+                        muv_i,
+                        beti,
+                        high_prob_emit=high_prob_emit,
+                        EW_fixed=EW_fixed,
+                    )[1] for blah in range(n_inside_tau)]
+                )
+            else:
+                lae_now_i = np.array(
+                    [L_intr_AH22(muv_i) for blah in range(n_inside_tau)]
+                )
 
             la_flux_gal_i[
             bubble_iter * n_inside_tau: (bubble_iter + 1) * n_inside_tau
@@ -391,19 +397,29 @@ def calculate_taus_prep(
         red_edge_up_sorted = red_edge_up[np.flip(indices_up)]
         red_edge_lo_sorted = red_edge_lo[np.flip(indices_up)]
 
-        indices_to_del_lo = []
-        indices_to_del_up = []
-        for i_fi in range(len(z_edge_up) - 1):
-            if len(z_edge_up_sorted) != 1:
-                if z_edge_lo_sorted[i_fi] < z_edge_up_sorted[i_fi + 1]:
-                    # got an overlapping bubble
-                    indices_to_del_lo.append(i_fi)
-                    indices_to_del_up.append(i_fi + 1)
-        z_edge_lo_sorted = np.delete(z_edge_lo_sorted, indices_to_del_lo)
-        z_edge_up_sorted = np.delete(z_edge_up_sorted, indices_to_del_up)
-        red_edge_up_sorted = np.delete(red_edge_up_sorted, indices_to_del_up)
-        red_edge_lo_sorted = np.delete(red_edge_lo_sorted, indices_to_del_lo)
+        while True:
+            indices_to_del_lo = []
+            indices_to_del_up = []
+            for i_fi in range(len(z_edge_up_sorted) - 1):
+                if len(z_edge_up_sorted) != 1:
+                    if z_edge_lo_sorted[i_fi] < z_edge_up_sorted[i_fi + 1]:
+                        # got an overlapping bubble
+                        indices_to_del_lo.append(i_fi)
+                        indices_to_del_up.append(i_fi + 1)
+            if len(indices_to_del_lo) == 0:
+                break
+            z_edge_lo_sorted = np.delete(z_edge_lo_sorted, indices_to_del_lo)
+            z_edge_up_sorted = np.delete(z_edge_up_sorted, indices_to_del_up)
+            red_edge_up_sorted = np.delete(red_edge_up_sorted,
+                                           indices_to_del_up)
+            red_edge_lo_sorted = np.delete(red_edge_lo_sorted,
+                                           indices_to_del_lo)
         tau_i = np.zeros(len(wave_em))
+
+        red_edge_up_sorted = np.flip(red_edge_up_sorted)
+        z_edge_up_sorted = np.flip(z_edge_up_sorted)
+        red_edge_lo_sorted = np.flip(red_edge_lo_sorted)
+        z_edge_lo_sorted = np.flip(z_edge_lo_sorted)
 
         # up to this point, redshifts are calculated for ionized bubbles.
         # An idea is to calculate taus for all outside bubbles, and remember the
@@ -464,7 +480,6 @@ def calculate_taus_prep(
             else:
                 raise IndexError("Something else")
     taus = taus.flatten()
-    taus[taus < 0.0] = np.inf
 
     return (
         taus.reshape((n_iter, len(wave_em))),
@@ -543,5 +558,4 @@ def calculate_taus_post(
             else:
                 raise IndexError("Something else")
     taus = taus.flatten()
-    taus[taus < 0.0] = np.inf
     return taus.reshape((n_iter, len(wave_em)))

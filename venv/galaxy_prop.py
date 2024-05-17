@@ -1,6 +1,6 @@
 import numpy as np
 from astropy import units as u
-from numpy.random import normal
+from numpy.random import normal, binomial
 from astropy.cosmology import z_at_value
 from astropy.cosmology import Planck18 as Cosmo
 from scipy import integrate
@@ -232,6 +232,8 @@ def get_mock_data(
         else:
             dist = 0
             z_end_bub = red_s
+
+        #Is it maybe different inconsistent taus?
         tau = calculate_taus_i(
             x_b,
             y_b,
@@ -613,3 +615,44 @@ def get_spectrum(
 
     return 0.5 * (bins_po[1:] + bins_po[:-1]), cont_flux
 
+
+def L_intr_AH22(Muv):
+    def sigma(mh):
+        if mh > 1e10:
+            return 0.1  # log-normal
+        else:
+            return 1.0
+
+    csv_AH_22 = np.loadtxt(
+        '/home/inikolic/projects/Lyalpha_bubbles/Literature/AH+22/L_intr_Mass.csv',
+        delimiter=','
+    )
+    mass = csv_AH_22[:, 0]
+    L_intr = csv_AH_22[:, 1]
+    Muvs = np.load(
+        '/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/venv/data/Muv.npy')
+    mh = np.load(
+        '/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/venv/data/mh.npy')
+    mh_now = np.interp(Muv, np.flip(Muvs), np.flip(mh))
+    mean_L = np.interp(np.log10(mh_now), np.log10(mass), L_intr)
+
+    print(np.log10(mh_now))
+    if hasattr(mh_now, '__len__'):
+        li = np.zeros(np.shape(Muv))
+        for ind, (mi, meanil) in enumerate(
+                zip(mh_now.flatten(), mean_L.flatten())):
+            if mi > 1e10:
+                li[ind] = 10 ** normal(meanil, 0.4)
+            else:
+                if binomial(0.5):
+                    li[ind] = 10 ** normal(meanil, 1.0)
+                else:
+                    li[ind] = 0.0
+        return li.reshape(np.shape(Muv))
+    if mh_now > 1e10:
+        return 10 ** normal(mean_L, 0.4)
+    else:
+        if binomial(0.5):
+            return 10 ** normal(mean_L, 1.0)
+        else:
+            return 0.0

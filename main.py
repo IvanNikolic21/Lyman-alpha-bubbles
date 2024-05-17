@@ -5,7 +5,6 @@ from numpy.linalg import LinAlgError
 import argparse
 import os
 import shutil
-from scipy import integrate
 from scipy.stats import gaussian_kde
 
 from astropy.cosmology import z_at_value
@@ -15,7 +14,7 @@ import datetime
 import itertools
 from joblib import Parallel, delayed
 
-from venv.galaxy_prop import get_js, get_mock_data, p_EW
+from venv.galaxy_prop import get_js, get_mock_data, p_EW, L_intr_AH22
 from venv.galaxy_prop import get_muv, tau_CGM, calculate_number
 
 from venv.save import HdF5Saver, HdF5SaverAft, HdF5SaveMocks
@@ -253,7 +252,12 @@ def _get_likelihood(
             )
             del fi_bu_en_czl_i, fi_bu_en_czu_i, fi_bu_en_rl_i, fi_bu_en_ru_i
 
+            tau_sh = np.shape(tau_now_i)
+            tau_now_i_fl = tau_now_i.flatten()
+            tau_now_i_fl[tau_now_i_fl < 0.0] = np.inf
+            tau_now_i = tau_now_i_fl.reshape(tau_sh)
             tau_now_i = np.nan_to_num(tau_now_i, np.inf)
+
             tau_now_full[n * n_inside_tau:(n + 1) * n_inside_tau, :] = tau_now_i
             eit_l = np.exp(-np.array(tau_now_i))
 
@@ -301,8 +305,8 @@ def _get_likelihood(
                             keep_conp[
                                 index_gal, n * n_inside_tau + index_tau_for] = 0
 
-            del res
-            del flux_now_i
+            #del res
+            #del flux_now_i
 
             j_s_now.extend(cont_filled.j_s_full[index_gal_eff][
                            n * n_inside_tau: (n + 1) * n_inside_tau
@@ -342,7 +346,7 @@ def _get_likelihood(
                     spectrum_now[n * n_inside_tau:(n + 1) * n_inside_tau,
                     bin_i - 1,
                     :bin_i] = spectrum_now_i.T
-                    del spectrum_now_i
+                    #del spectrum_now_i
             else:
                 continuum_i = (
                         cont_filled.la_flux_out_full[index_gal_eff][
@@ -361,7 +365,7 @@ def _get_likelihood(
                     noise_on_the_spectrum,
                     np.shape(full_flux_res_i)
                 )
-                del continuum_i
+                #del continuum_i
                 for bin_i, wav_dig_i in zip(
                         range(2, inputs.bins_tot), wave_em_dig_arr
                 ):
@@ -370,7 +374,7 @@ def _get_likelihood(
                     :bin_i] = perturb_flux(
                         full_flux_res_i, bin_i
                     )
-                del full_flux_res_i
+                #del full_flux_res_i
 
         if cache:
 
@@ -421,8 +425,8 @@ def _get_likelihood(
         ):
             tau_kde = gaussian_kde((np.array(tau_line)), bw_method=0.15)
             fl_l = np.log10(1e19 * (3e-19 + (np.array(flux_line))))
-            if ind_data==0:
-                print("Just in case, this is fl_l", fl_l, flux_line, "flux_line as well", flush=True)
+            #if ind_data==0:
+                #print("Just in case, this is fl_l", fl_l, flux_line, "flux_line as well", flush=True)
             if np.any(np.isnan(fl_l.flatten())) or np.any(np.isinf(fl_l.flatten())):
                 ind_nan = np.isnan(fl_l.flatten()).index(1)
                 ind_inf = np.isinf(fl_l.flatten()).index(1)
@@ -442,8 +446,6 @@ def _get_likelihood(
                 bw_method=0.15
             )
 
-            # if la_e_in is not None:
-            #     flux_tau = flux_mock[ind_data] * tau_data[ind_data]
             # print(len(spec_kde), flush=True)
             # print(len(list(range(6,len(bins)))), flush=True)
             # like_on_flux = np.array(like_on_flux)
@@ -468,7 +470,7 @@ def _get_likelihood(
                         tau_kde.evaluate((tau_data[ind_data]))
                     )
             if like_on_flux is not False:
-                for bin_i in range(2, bins_tot):
+                for bin_i in range(2, bins_tot-1):
 
                     if bin_i < 4:
                         data_to_get = np.log10(
@@ -478,6 +480,9 @@ def _get_likelihood(
                         data_to_get = np.log10(
                             1e18 * (5e-19 + spec_line[:, bin_i - 1, 1:4]).T
                         )
+                    #print(data_to_get, flush=True)
+                    #print("just in case, print", data_to_get[0], flush=True)
+                    #print("also", data_to_get[-1], flush=True)
                     # print(spec_line[:,bin_i-1, 1:bin_i], np.shape(spec_line[:,bin_i-1, 1:bin_i]))
                     spec_kde = gaussian_kde(data_to_get, bw_method=0.2)
 
@@ -500,7 +505,7 @@ def _get_likelihood(
                             data_to_eval
                         )
                     )
-            print("This is flux_int", flux_int)
+            #print("This is flux_int", flux_int)
             if flux_int[ind_data] < flux_limit:
                 print("This galaxy failed the tau test, it's flux is",
                       flux_int[ind_data])
@@ -533,7 +538,7 @@ def _get_likelihood(
         print("OOps there was value error, let's see why:", flush=True)
         # print(tau_data, flush=True)
         # print(taus_tot_b, flush=True)
-        raise TypeError
+        #raise TypeError
 
     if not cache:
         names_used_this_iter = None
@@ -564,13 +569,11 @@ def sample_bubbles_grid(
         redshift=7.5,
         muv=None,
         beta_data=None,
-        xh_unc=False,
         la_e=None,
         flux_int=None,
         multiple_iter=False,
         flux_limit=1e-18,
         like_on_flux=False,
-        resolution_worsening=1,
         n_inside_tau=50,
         bins_tot=20,
         cache=True,
@@ -601,8 +604,6 @@ def sample_bubbles_grid(
         redshift of the analysis.
     :param muv: muv,
         UV magnitude data
-    :param include_muv_unc: boolean,
-        whether to include muv uncertainty.
     :param beta_data: float,
         beta data.
     :param xh_unc: boolean
@@ -864,6 +865,7 @@ if __name__ == '__main__':
     parser.add_argument("--noise_on_the_spectrum", type=float, default=2e-20)
     parser.add_argument("--consistent_noise", action="store_true")
     parser.add_argument("--constrained_prior", action="store_true")
+    parser.add_argument("--AH22_model", action="store_true")
     inputs = parser.parse_args()
 
     if inputs.uvlf_consistently:
@@ -1013,13 +1015,16 @@ if __name__ == '__main__':
                         wave_em.value)
                 )
 
-        ew_factor, la_e = p_EW(
-            Muv.flatten(),
-            beta.flatten(),
-            return_lum=True,
-            high_prob_emit=inputs.high_prob_emit,
-            EW_fixed=inputs.EW_fixed,
-        )
+        if inputs.AH22_model:
+            la_e = L_intr_AH22(Muv.flatten())
+            ew_factor = np.ones((np.shape(Muv)))
+        else:
+            ew_factor, la_e = p_EW(
+                Muv.flatten(),
+                beta.flatten(),
+                high_prob_emit=inputs.high_prob_emit,
+                EW_fixed=inputs.EW_fixed,
+            )
         ew_factor = ew_factor.reshape((np.shape(Muv)))
         la_e = la_e.reshape((np.shape(Muv)))
         data = np.array(tau_data_I)
@@ -1314,7 +1319,7 @@ if __name__ == '__main__':
     if inputs.mock_direc is None:
         flux_mock = la_e / (
                 4 * np.pi * Cosmo.luminosity_distance(
-            7.5).to(u.cm).value ** 2
+            redshifts_of_mocks).to(u.cm).value ** 2
         )
         flux_tau = flux_mock * tau_data_I
         flux_tau += np.random.normal(0, 5e-20, np.shape(flux_tau))
@@ -1338,6 +1343,7 @@ if __name__ == '__main__':
         high_prob_emit=inputs.high_prob_emit,
         EW_fixed=inputs.EW_fixed,
         cache=inputs.cache,
+        AH22_model=inputs.AH22_model,
     )
 
     likelihoods, names_used = sample_bubbles_grid(
@@ -1355,7 +1361,6 @@ if __name__ == '__main__':
         multiple_iter=inputs.multiple_iter,
         flux_limit=inputs.flux_limit,
         like_on_flux=like_on_flux,
-        resolution_worsening=inputs.resolution_worsening,
         n_inside_tau=inputs.n_inside_tau,
         cache=inputs.cache,
         like_on_tau_full=inputs.like_on_tau_full,
