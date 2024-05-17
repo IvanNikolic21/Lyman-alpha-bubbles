@@ -470,8 +470,7 @@ def _get_likelihood(
                         tau_kde.evaluate((tau_data[ind_data]))
                     )
             if like_on_flux is not False:
-                for bin_i in range(2, bins_tot-1):
-
+                for bin_i in range(2, bins_tot):
                     if bin_i < 4:
                         data_to_get = np.log10(
                             1e18 * (5e-19 + spec_line[:, bin_i - 1, 1:bin_i]).T
@@ -491,14 +490,14 @@ def _get_likelihood(
                             (1e18 * (
                                     5e-19 + like_on_flux[ind_data][
                                             bin_i - 1, 1:bin_i])
-                             ).reshape(bin_i - 1, 1)
+                            ).reshape(bin_i - 1, 1)
                         )
                     else:
                         data_to_eval = np.log10(
                             (1e18 * (
                                     5e-19 + like_on_flux[ind_data][
                                             bin_i - 1, 1:4])
-                             ).reshape(3, 1)
+                            ).reshape(3, 1)
                         )
                     likelihood_spec[:ind_data, bin_i - 1] += np.log(
                         spec_kde.evaluate(
@@ -1368,6 +1367,7 @@ if __name__ == '__main__':
         consistent_noise=inputs.consistent_noise,
         cont_filled=cont_filled,
         redshifts_of_mocks=redshifts_of_mocks,
+        bins_tot=inputs.bins_tot
     )
 
     dict_to_save_data = dict()
