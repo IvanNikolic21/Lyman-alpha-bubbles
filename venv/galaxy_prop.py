@@ -257,6 +257,7 @@ def calculate_EW_factor(
         beta,
         mean=False,
         return_lum=True,
+        main_dir='/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles'
 ):
     """
     Function calculates the luminosity factor that is necessary to calculate
@@ -276,8 +277,8 @@ def calculate_EW_factor(
         equivalent width that, when multiplied with transmission, gives EW.
     """
 
-    Muv_thesan = np.load('/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/venv/data/Muv_THESAN.npy')
-    La_thesan = np.load('/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/venv/data/Lya_THESAN.npy')
+    Muv_thesan = np.load(main_dir + '/venv/data/Muv_THESAN.npy')
+    La_thesan = np.load(main_dir + '/venv/data/Lya_THESAN.npy')
     if hasattr(Muv, '__len__'):
          La_sample = np.zeros((len(Muv)))
          La_sample_mean = np.zeros((len(Muv)))
@@ -489,26 +490,29 @@ def p_EW(
                 return 0.
 
 
-def tau_CGM(Muv):
-    Muvs = np.load('/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/venv/data/Muv.npy')
-    mh = np.load('/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/venv/data/mh.npy')
+def tau_CGM(
+        Muv,
+        main_dir='/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles'
+):
+    Muvs = np.load(main_dir + '/venv/data/Muv.npy')
+    mh = np.load(main_dir + '/venv/data/mh.npy')
     mh_now = np.interp(Muv, np.flip(Muvs), np.flip(mh))
     v_c = ((10 * const.G * mh_now*u.M_sun * Cosmo.H(7.5))**( 1/3)).to(u.km/u.s).value
     if hasattr(Muv, '__len__'):
-        tau_CGM = np.ones((len(Muv),100))
+        tau_CGM_ = np.ones((len(Muv),100))
         for imi,mi in enumerate(Muv):
             for i_w,wv in enumerate(wave_em):
                 if wave_to_dv(wv).value < v_c[imi]:
-                    tau_CGM[imi,i_w] = 0.0
+                    tau_CGM_[imi,i_w] = 0.0
 
     else:
-        tau_CGM = np.ones(100)
+        tau_CGM_ = np.ones(100)
         for i_w, wv in enumerate(wave_em):
             if wave_to_dv(wv).value < v_c:
-                tau_CGM[i_w] = 0.0
+                tau_CGM_[i_w] = 0.0
             else:
                 break
-    return tau_CGM
+    return tau_CGM_
 
 
 def calculate_number(

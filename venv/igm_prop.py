@@ -724,7 +724,10 @@ def tau_wv(
     return tau
 
 
-def get_xH(z):
+def get_xH(
+        z,
+        main_dir="home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/",
+):
     """
         Function returns neutral fraction as a sample from the distribution at a
         given redshift
@@ -734,8 +737,8 @@ def get_xH(z):
     :return:
     """
 
-    xHs_all = np.load('/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/venv/data/global_xHs.npy')
-    node_r = np.load('/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/venv/data/node_r.npy')
+    xHs_all = np.load(main_dir + '/venv/data/global_xHs.npy')
+    node_r = np.load(main_dir + '/venv/data/node_r.npy')
     xHs = []
     for x in xHs_all:
         xHs.append(np.interp(z, np.flip(node_r), np.flip(x)))

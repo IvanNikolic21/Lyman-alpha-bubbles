@@ -55,6 +55,7 @@ def _get_likelihood(
         constrained_prior=False,
         reds_of_galaxies=None,
         dir_name=None,
+        main_dir='/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles'
 ):
     """
 
@@ -161,7 +162,7 @@ def _get_likelihood(
             z_end_bub = red_s
 
         #CGM contribution is non-stochastic so it can be outside the loop.
-        tau_cgm_in = tau_CGM(muvi)
+        tau_cgm_in = tau_CGM(muvi, main_dir=main_dir)
 
         for n in range(n_iter_bub):
             # j_s = get_js(
@@ -428,8 +429,8 @@ def _get_likelihood(
             #if ind_data==0:
                 #print("Just in case, this is fl_l", fl_l, flux_line, "flux_line as well", flush=True)
             if np.any(np.isnan(fl_l.flatten())) or np.any(np.isinf(fl_l.flatten())):
-                ind_nan = np.isnan(fl_l.flatten()).index(1)
-                ind_inf = np.isinf(fl_l.flatten()).index(1)
+                ind_nan = np.isnan(fl_l.flatten()).tolist().index(1)
+                ind_inf = np.isinf(fl_l.flatten()).tolist().index(1)
                 print("Oops maybe zeros?")
                 if ind_nan is not None:
                     print(flux_line[ind_nan], flush=True)
@@ -582,6 +583,8 @@ def sample_bubbles_grid(
         cont_filled=None,
         constrained_prior=False,
         redshifts_of_mocks=None,
+        main_dir='/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/',
+        cache_dir='/home/inikolic/projects/Lyalpha_bubbles/_cache/',
 ):
     """
     The function returns the grid of likelihood values for given input
@@ -713,6 +716,8 @@ def sample_bubbles_grid(
                     constrained_prior=constrained_prior,
                     reds_of_galaxies=redshifts_of_mocks[ind_iter],
                     dir_name=dir_name,
+                    main_dir=main_dir,
+                    cache_dir=cache_dir,
                 ) for index, (xb, yb, zb, rb) in enumerate(
                     itertools.product(x_grid, y_grid, z_grid, r_grid)
                 )
@@ -785,6 +790,8 @@ def sample_bubbles_grid(
                 constrained_prior=constrained_prior,
                 reds_of_galaxies=redshifts_of_mocks,
                 dir_name=dir_name,
+                main_dir=main_dir,
+                cache_dir=cache_dir,
             ) for index, (xb, yb, zb, rb) in enumerate(
                 itertools.product(x_grid, y_grid, z_grid, r_grid)
             )
@@ -865,6 +872,8 @@ if __name__ == '__main__':
     parser.add_argument("--consistent_noise", action="store_true")
     parser.add_argument("--constrained_prior", action="store_true")
     parser.add_argument("--AH22_model", action="store_true")
+    parser.add_argument("--main_dir", type=str, default="/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/")
+    parser.add_argument("--cache_dir", type=str, default='/home/inikolic/projects/Lyalpha_bubbles/_cache/')
     inputs = parser.parse_args()
 
     if inputs.uvlf_consistently:
@@ -975,7 +984,7 @@ if __name__ == '__main__':
                 one_J_arr[index_iter, :, :] = np.array(one_J[0][:n_gal])
 
                 for i_gal in range(len(tdi)):
-                    tau_cgm_gal = tau_CGM(Muv[index_iter][i_gal])
+                    tau_cgm_gal = tau_CGM(Muv[index_iter][i_gal], main_dir=inputs.main_dir)
                     eit = np.exp(-tdi[i_gal])
                     tau_data_I[index_iter, i_gal] = np.trapz(
                         eit * tau_cgm_gal * one_J[0][i_gal],
@@ -1007,7 +1016,7 @@ if __name__ == '__main__':
             )
             for i in range(len(td)):
                 eit = np.exp(-td[i])
-                tau_cgm_gal = tau_CGM(Muv[i])
+                tau_cgm_gal = tau_CGM(Muv[i], main_dir=inputs.main_dir)
                 tau_data_I.append(
                     np.trapz(
                         eit * tau_cgm_gal * one_J[0][i] ,
@@ -1204,7 +1213,7 @@ if __name__ == '__main__':
                                          y=(la_e[index_gal] * one_J[
                                              index_gal] * np.exp(
                                              -td[index_gal]
-                                         ) * tau_CGM(Muv[index_gal]) / (
+                                         ) * tau_CGM(Muv[index_gal], main_dir=inputs.main_dir) / (
                                                     4 * np.pi * Cosmo.luminosity_distance(
                                                 7.5).to(
                                                 u.cm).value ** 2)
@@ -1229,7 +1238,7 @@ if __name__ == '__main__':
                                                                         :] * np.exp(
                                             -td[index_iter, index_gal, :]
                                         ) * tau_CGM(
-                                            Muv[index_iter, index_gal]) / (
+                                            Muv[index_iter, index_gal], main_dir=inputs.main_dir) / (
                                                    4 * np.pi * Cosmo.luminosity_distance(
                                                7.5).to(
                                                u.cm).value ** 2)
@@ -1257,7 +1266,7 @@ if __name__ == '__main__':
                     one_J = one_J_arr[0]
                     continuum = (
                             la_e[:, :, np.newaxis] * one_J * np.exp(-td) * tau_CGM(
-                        Muv) / (
+                        Muv, main_dir=inputs.main_dir) / (
                                     4 * np.pi * Cosmo.luminosity_distance(
                                 7.5
                             ).to(u.cm).value ** 2)
@@ -1286,7 +1295,7 @@ if __name__ == '__main__':
                     #     Muv)))
                     continuum = (
                             la_e[:, np.newaxis] * one_J[:n_gal,:] * np.exp(-td) * tau_CGM(
-                        Muv) / (
+                        Muv, main_dir=inputs.main_dir) / (
                                     4 * np.pi * Cosmo.luminosity_distance(
                                 7.5
                             ).to(u.cm).value ** 2)
@@ -1343,6 +1352,8 @@ if __name__ == '__main__':
         EW_fixed=inputs.EW_fixed,
         cache=inputs.cache,
         AH22_model=inputs.AH22_model,
+        main_dir=inputs.main_dir,
+        cache_dir=inputs.cache_dir,
     )
 
     likelihoods, names_used = sample_bubbles_grid(
@@ -1367,7 +1378,9 @@ if __name__ == '__main__':
         consistent_noise=inputs.consistent_noise,
         cont_filled=cont_filled,
         redshifts_of_mocks=redshifts_of_mocks,
-        bins_tot=inputs.bins_tot
+        bins_tot=inputs.bins_tot,
+        main_dir=inputs.main_dir,
+        cache_dir=inputs.cache_dir
     )
 
     dict_to_save_data = dict()
