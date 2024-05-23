@@ -124,7 +124,7 @@ def get_content(
     cont_now.add_com_fact(com_factor.reshape(np.shape(Muvs)))
 
     if beta is None:
-        beta = np.array([-2.0] * len(Muvs))
+        beta = np.array([-2.0] * len(Muvs.flatten())).reshape(np.shape(Muvs))
 
     def _get_content_par(muv_i, beti, redi):
         j_s_gal_i = np.zeros((n_iter_bub * n_inside_tau, 100))
@@ -233,32 +233,32 @@ def get_content(
         muv_i,
         beti,
         redi
-    ) for (muv_i, beti, redi) in zip(Muvs, beta, redshifts_of_mocks))
+    ) for (muv_i, beti, redi) in zip(Muvs.flatten(), beta.flatten(), redshifts_of_mocks.flatten()))
 
-    for index_gal in range(len(Muvs)):
+    for index_gal in range(len(Muvs.flatten())):
 
         if cache:
             dict_gal = {
-                'redshift': redshifts_of_mocks[index_gal],
-                'x_galaxy_position': x_gal_position[index_gal],
-                'y_galaxy_position': y_gal_position[index_gal],
-                'z_galaxy_position': z_gal_position[index_gal],
-                'Muv': Muvs[index_gal],
-                'beta': beta[index_gal],
+                'redshift': redshifts_of_mocks.flatten()[index_gal],
+                'x_galaxy_position': x_gal_position.flatten()[index_gal],
+                'y_galaxy_position': y_gal_position.flatten()[index_gal],
+                'z_galaxy_position': z_gal_position.flatten()[index_gal],
+                'Muv': Muvs.flatten()[index_gal],
+                'beta': beta.flatten()[index_gal],
                 'n_iter_bub': n_iter_bub,
                 'n_inside_tau': n_inside_tau,
             }
 
             try:
                 save_cl = HdF5Saver(
-                    x_gal=x_gal_position[index_gal],
+                    x_gal=x_gal_position.flatten()[index_gal],
                     n_iter_bub=n_iter_bub,
                     n_inside_tau=n_inside_tau,
                     output_dir=cache_dir + '/' + dir_name,
                 )
             except IndexError:
                 save_cl = HdF5Saver(
-                    x_gal=x_gal_position[index_gal],
+                    x_gal=x_gal_position.flatten()[index_gal],
                     n_iter_bub=n_iter_bub,
                     n_inside_tau=n_inside_tau,
                     output_dir=cache_dir + '/' + dir_name,
