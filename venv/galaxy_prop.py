@@ -407,7 +407,8 @@ def p_EW(
         mean=False,
         return_lum=True,
         high_prob_emit=False,
-        EW_fixed=False
+        EW_fixed=False,
+        gauss_distr=False,
 ):
     """
     Function shall give sample from the distribution
@@ -453,8 +454,16 @@ def p_EW(
             lum_alpha = np.zeros((len(Muv)))
         for i, (muvi, beti) in enumerate(zip(Muv, beta)):
             if np.random.binomial(1, A(muvi)):
-                EW_cumsum = integrate.cumtrapz(
-                    1 / W(muvi) * np.exp(-Ws / W(muvi)), Ws)
+                if not gauss_distr:
+                    EW_cumsum = integrate.cumtrapz(
+                        1 / W(muvi) * np.exp(-Ws / W(muvi)), Ws)
+                else:
+                    EW_cumsum = integrate.cumtrapz(
+                        2 / np.sqrt(2 * np.pi) / W(muvi) * np.exp(
+                            -0.5 * (Ws /W(muvi))**2
+                        ),
+                        Ws
+                    )
                 cumsum = EW_cumsum / EW_cumsum[-1]
                 rn = np.random.uniform(size=1)
                 EW_now = \
@@ -473,8 +482,16 @@ def p_EW(
             return EWs
     else:
         if np.random.binomial(1, A(Muv)):
-            EW_cumsum = integrate.cumtrapz(1 / W(Muv) * np.exp(-Ws / W(Muv)),
-                                           Ws)
+            if not gauss_distr:
+                EW_cumsum = integrate.cumtrapz(1 / W(Muv) * np.exp(-Ws / W(Muv)),
+                                            Ws)
+            else:
+                EW_cumsum = integrate.cumtrapz(
+                    2 / np.sqrt(2 * np.pi) / W(Muv) * np.exp(
+                        -0.5 * (Ws / W(Muv))**2
+                    ),
+                    Ws
+                )
             cumsum = EW_cumsum / EW_cumsum[-1]
             rn = np.random.uniform(size=1)
             EW_now = \
