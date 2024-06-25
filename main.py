@@ -21,7 +21,7 @@ from venv.save import HdF5Saver, HdF5SaverAft, HdF5SaveMocks
 from venv.helpers import z_at_proper_distance, full_res_flux, perturb_flux
 from venv.speed_up import get_content, calculate_taus_post
 
-wave_em = np.linspace(1214, 1225., 100) * u.Angstrom
+wave_em = np.linspace(1214, 1230., 100) * u.Angstrom
 wave_Lya = 1215.67 * u.Angstrom
 
 

@@ -10,7 +10,7 @@ import scipy
 wave_Lya = 1215.67 * u.Angstrom
 sigma_ion0 = 6.304e-18*u.cm**2.
 freq_Lya = (const.c / wave_Lya).to(u.Hz)
-wave_em = np.linspace(1214, 1225., 100) * u.Angstrom
+wave_em = np.linspace(1214, 1230., 100) * u.Angstrom
 
 def I(x):
     return x**4.5 / (1-x) + 9/7 * x**3.5  + 9/5 * x**2.5 + 3 * x**1.5 + 9 * x**0.5 - np.log(abs((1+x**0.5)/(1-x**0.5)))

@@ -10,7 +10,7 @@ from joblib import Parallel, delayed
 import datetime
 from astropy.cosmology import Planck18 as Cosmo
 
-wave_em = np.linspace(1214, 1225., 100) * u.Angstrom
+wave_em = np.linspace(1214, 1230., 100) * u.Angstrom
 wave_Lya = 1215.67 * u.Angstrom
 freq_Lya = (const.c / wave_Lya).to(u.Hz)
 r_alpha = 6.25 * 1e8 / (4 * np.pi * freq_Lya.value)

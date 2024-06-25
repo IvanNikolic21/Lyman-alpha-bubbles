@@ -23,7 +23,7 @@ from venv.data.EndSta import get_ENDSTA_gals
 
 from venv.chmf import chmf as chmf_func
 
-wave_em = np.linspace(1214, 1225., 100) * u.Angstrom
+wave_em = np.linspace(1214, 1230., 100) * u.Angstrom
 dir_all = '/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/'
 
 def delta_v_func(
