@@ -194,7 +194,7 @@ def _get_likelihood_cache(
         bins_likelihood=None,
 ):
     if constrained_prior:
-        width_conp = 0.3
+        width_conp = 0.4
     likelihood_spec = np.zeros((len(xs), bins_tot - 1))
     likelihood_int = np.zeros((len(xs)))
     likelihood_tau = np.zeros((len(xs)))
