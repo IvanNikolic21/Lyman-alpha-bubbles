@@ -803,8 +803,8 @@ def cache_main(
     z_max = 5.0
     z_grid = np.linspace(z_min, z_max, n_grid)
 
-    x_grid = np.linspace(-5.0, 5.0, 5)
-    y_grid = np.linspace(-5.0, 5.0, 5)
+    x_grid = np.linspace(-5.0, 5.0, n_grid)
+    y_grid = np.linspace(-5.0, 5.0, n_grid)
     r_grid = np.linspace(r_min, r_max, n_grid)
     print("Preparing for start", flush=True)
 
