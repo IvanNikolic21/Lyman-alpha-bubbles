@@ -421,11 +421,11 @@ def _get_likelihood_cache(
             likelihood_int[:ind_data+1] += np.log(flux_kde.integrate_box(0.05,
                                                                         np.log10(
                                                                             1e19 * (
-                                                                                    3e-19 + flux_limit))))
+                                                                                    4e-19 + flux_limit))))
 
         else:
             likelihood_int[:ind_data+1] += np.log(flux_kde.evaluate(
-                np.log10(1e19 * (3e-19 + flux_int[ind_data])))
+                np.log10(1e19 * (4e-19 + flux_int[ind_data])))
             )
 
     # except (LinAlgError, ValueError, TypeError):
