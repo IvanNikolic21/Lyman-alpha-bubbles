@@ -383,7 +383,7 @@ def _get_likelihood_cache(
                 spec_kde = KernelDensity(
                     #kernel='epanechnikov',
                     kernel='exponential',
-                    bandwidth=0.18
+                    bandwidth=0.12
                 ).fit(
                     data_to_get.T
                 )
