@@ -133,7 +133,12 @@ full_flux_res += np.random.normal(
 flux_noise_mock[:,  :] = perturb_flux(
     full_flux_res, 11
 )
-
+flux_mock = la_e / (
+        4 * np.pi * Cosmo.luminosity_distance(
+    redshifts_of_mocks).to(u.cm).value ** 2
+)
+flux_tau = flux_mock * tau_data_I
+flux_tau += np.random.normal(0, 5e-20, np.shape(flux_tau))
 #data = rng.normal(TRUE_MU, SIGMA, size=(N_DATA, 2))   # shape (N_DATA, 2)
 
 NDIM = 4
@@ -194,7 +199,7 @@ def log_likelihood(theta):
         muv = Muv_mock,
         beta_data = beta,
         la_e_in = la_e,
-        flux_int = None,
+        flux_int = flux_tau,
         flux_limit = 2e-19,
         like_on_flux = flux_noise_mock,
         n_inside_tau = 10,
