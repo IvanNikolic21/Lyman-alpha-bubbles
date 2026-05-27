@@ -174,7 +174,7 @@ def log_likelihood(theta):
         flux_limit = 2e-19,
         like_on_flux = flux_noise_mock,
         n_inside_tau = 10,
-        bins_tot = bins_arr,
+        bins_tot = 11,
         cache = False,
         like_on_tau_full = False,
         noise_on_the_spectrum = 5e-20,
