@@ -15,16 +15,124 @@ verify that dynesty got it right.
 import numpy as np
 import matplotlib.pyplot as plt
 import dynesty
+from main import _get_likelihood
 from dynesty import plotting as dyplot
 from dynesty.utils import resample_equal
-
+from astropy.cosmology import Planck18 as Cosmo
+import astropy.units as u
+from venv.galaxy_prop import get_muv, get_mock_data, get_js, tau_CGM, p_EW
+from venv.helpers import z_at_proper_distance, full_res_flux, perturb_flux
 # ── Ground truth and fake data ────────────────────────────────────────────────
 
-TRUE_MU = np.array([2.5, -1.0])       # what we want to recover
-SIGMA   = np.array([0.5,  0.8])       # known measurement noise (per axis)
-N_DATA  = 30
+TRUE_MU = np.array([0,0,0,10])       # what we want to recover
+#SIGMA   = np.array([0.5,  0.8])       # known measurement noise (per axis)
+N_DATA  = 50
+main_dir='/groups/astro/ivannik/programs/Lyman-alpha-bubbles/'
+wave_em = np.linspace(1214, 1225., 100) * u.Angstrom
+wave_Lya = 1215.67 * u.Angstrom
+
 
 rng  = np.random.default_rng(42)
+
+Muv_mock = get_muv(
+                    n_gal=N_DATA,
+                    redshift=7.5,
+                    muv_cut=-18,
+                )
+beta = -2.0 * np.ones(N_DATA)
+tau_mock, x_gal_mock, y_gal_mock, z_gal_mock, x_bubbles_mock, y_bubbles_mock, z_bubbles_mock, r_bubs_mock = get_mock_data(
+                n_gal=N_DATA,
+                z_start=7.5,
+                r_bubble=10,
+                dist=15,
+)
+
+redshifts_of_mocks = np.zeros((N_DATA))
+for i in range(N_DATA):
+    red_s = z_at_proper_distance(
+        - z_gal_mock[i] / (1 + 7.5) * u.Mpc, 7.5
+    )
+    redshifts_of_mocks[i] = red_s
+
+tau_data_I = []
+one_J = get_js(   #TODO: reformat this function
+    z=7.5,        #TODO: get rid of implicit redshift dependence through inputs
+    muv=Muv_mock,
+    n_iter=N_DATA,
+)
+area_factor = np.array(
+    [
+        np.trapz(
+            one_J[0][i_gal] * tau_CGM(Muv_mock[i_gal], main_dir=main_dir),
+            wave_em.value
+        ) / np.trapz(
+            one_J[0][i_gal],
+            wave_em.value
+        ) for i_gal in range(N_DATA)
+    ]
+)
+
+for i in range(len(tau_mock)):
+    eit = np.exp(-tau_mock[i])
+    tau_cgm_gal = tau_CGM(Muv_mock[i], main_dir=main_dir)
+    tau_data_I.append(
+        np.trapz(
+            eit * tau_cgm_gal * one_J[0][i],
+            wave_em.value)
+    )
+
+ew_factor, la_e = p_EW(
+    Muv_mock.flatten(),
+    beta.flatten(),
+)
+
+ew_factor = ew_factor.reshape((np.shape(Muv_mock)))
+ew_factor_orig = np.copy(ew_factor)
+ew_factor /= area_factor
+la_e = la_e.reshape((np.shape(Muv_mock)))
+la_e_orig = np.copy(la_e)
+la_e /= area_factor  # new improvement
+data = np.array(tau_data_I)
+
+bins_arr = np.linspace(
+        wave_em.value[0] * (1 + 7.5),
+        wave_em.value[-1] * (1 + 7.5),
+        11
+    )
+
+wave_em_dig_arr = np.digitize(
+        wave_em.value * (1 + 7.5),
+        bins_arr
+)
+
+
+flux_noise_mock = np.zeros(
+    (
+        N_DATA,
+        11
+    )
+)
+one_J = one_J[0]
+continuum = (
+        la_e[:, np.newaxis] * one_J[:N_DATA,:] * np.exp(-tau_mock) * tau_CGM(
+    Muv_mock, main_dir=main_dir) / (
+                4 * np.pi * Cosmo.luminosity_distance(
+            7.5
+        ).to(u.cm).value ** 2)
+)
+
+full_flux_res = full_res_flux(continuum, 7.5)
+flux_nonoise_save = np.copy(full_flux_res)
+
+full_flux_res += np.random.normal(
+    0,
+    5e-20,
+    np.shape(full_flux_res)
+)
+flux_noise_mock[:,  :] = perturb_flux(
+    full_flux_res, 11
+)
+
 data = rng.normal(TRUE_MU, SIGMA, size=(N_DATA, 2))   # shape (N_DATA, 2)
 
 NDIM = 2
@@ -35,8 +143,8 @@ NDIM = 2
 # prior_transform converts a point u in [0,1]^N to physical parameters.
 # Here we use a wide uniform prior on each axis.
 
-PRIOR_LO = np.array([-10.0, -10.0])
-PRIOR_HI = np.array([ 10.0,  10.0])
+PRIOR_LO = np.array([-10.0, -10.0, 10, 1])
+PRIOR_HI = np.array([ 10.0,  10.0, 10, 20])
 
 def prior_transform(u):
     """Uniform prior: [0,1]^2  ->  [PRIOR_LO, PRIOR_HI]."""
@@ -46,8 +154,41 @@ def prior_transform(u):
 
 def log_likelihood(theta):
     """Log p(data | theta): data is iid Gaussian around theta."""
-    residuals = data - theta          # broadcast over N_DATA rows
-    return -0.5 * np.sum((residuals / SIGMA) ** 2)
+    #residuals = data - theta          # broadcast over N_DATA rows
+    return _get_likelihood(
+        None,
+        theta[0],
+        theta[1],
+        theta[2],
+        theta[3],
+        x_gal_mock,
+        y_gal_mock,
+        z_gal_mock,
+        data,
+        10,
+        redshift = 7.5,
+        muv = Muv_mock,
+        beta_data = beta,
+        la_e_in = la_e,
+        flux_int = None,
+        flux_limit = 2e-19,
+        like_on_flux = flux_noise_mock,
+        n_inside_tau = 10,
+        bins_tot = bins_arr,
+        cache = False,
+        like_on_tau_full = False,
+        noise_on_the_spectrum = 5e-20,
+        consistent_noise = True,
+        cont_filled = None,
+        constrained_prior = False,
+        reds_of_galaxies = redshifts_of_mocks,
+        dir_name = None,
+        main_dir = main_dir,
+        cache_dir = None,
+        la_e_orig = la_e_orig,
+        prior_on_all = False,
+    )
+    #return -0.5 * np.sum((residuals / SIGMA) ** 2)
 
 # ── Analytic answer (for comparison) ─────────────────────────────────────────
 #
@@ -56,12 +197,12 @@ def log_likelihood(theta):
 #   sigma_posterior = SIGMA / sqrt(N_DATA)
 
 analytic_mean = data.mean(axis=0)
-analytic_std  = SIGMA / np.sqrt(N_DATA)
+#analytic_std  = SIGMA / np.sqrt(N_DATA)
 
 print("── Analytic answer ──────────────────────────────────")
 print(f"  True mu:           {TRUE_MU}")
 print(f"  Posterior mean:    {analytic_mean}")
-print(f"  Posterior std:     {analytic_std}")
+#print(f"  Posterior std:     {analytic_std}")
 
 # ── Run dynesty ───────────────────────────────────────────────────────────────
 #
