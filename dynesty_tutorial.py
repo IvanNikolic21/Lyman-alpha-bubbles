@@ -211,6 +211,7 @@ def log_likelihood(theta):
         cache_dir = None,
         la_e_orig = la_e_orig,
         prior_on_all = False,
+        wave_em_dig_arr=wave_em_dig_arr,
     )
     #return -0.5 * np.sum((residuals / SIGMA) ** 2)
 

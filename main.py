@@ -60,6 +60,7 @@ def _get_likelihood(
         main_dir='/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles',
         la_e_orig=None,
         prior_on_all=False,
+        wave_em_dig_arr=False,
 ):
     """
 
