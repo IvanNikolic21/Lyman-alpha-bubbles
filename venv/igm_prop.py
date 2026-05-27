@@ -179,7 +179,7 @@ def get_bubbles(
         #     xhi=xh
         # )
         rs = np.logspace(r_min, log_r_max, 1000)
-        cdf = integrate.cumtrapz(
+        cdf = integrate.cumulative_trapezoid(
             bubble_size_distro(
                 rs,
                 r_hist=None,
@@ -192,7 +192,7 @@ def get_bubbles(
         cdf = cdf.flatten()
     else:
         rs = np.logspace(-1, 3, 1000)
-        cdf = integrate.cumtrapz(
+        cdf = integrate.cumulative_trapezoid(
             bubble_size_distr(
                 rs
             ),
