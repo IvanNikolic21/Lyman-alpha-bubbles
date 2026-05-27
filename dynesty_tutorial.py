@@ -16,6 +16,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import dynesty
 from main import _get_likelihood
+from venv.speed_up import get_content
 from dynesty import plotting as dyplot
 from dynesty.utils import resample_equal
 from astropy.cosmology import Planck18 as Cosmo
@@ -152,6 +153,29 @@ def prior_transform(u):
 
 # ── Likelihood ────────────────────────────────────────────────────────────────
 
+
+cont_filled = get_content(
+    Muv_mock.flatten(),
+    redshifts_of_mocks,
+    x_gal_mock,
+    y_gal_mock,
+    z_gal_mock,
+    n_iter_bub=10,
+    n_inside_tau=10,
+    include_muv_unc=False,
+    fwhm_true=False,
+    redshift=7.5,
+    xh_unc=True,
+    high_prob_emit=False,
+    EW_fixed=False,
+    cache=None,
+    AH22_model=False,
+    main_dir=main_dir,
+    cache_dir=None,
+    gauss_distr=False,
+    Tang_distr=False,
+)
+
 def log_likelihood(theta):
     """Log p(data | theta): data is iid Gaussian around theta."""
     #residuals = data - theta          # broadcast over N_DATA rows
@@ -179,7 +203,7 @@ def log_likelihood(theta):
         like_on_tau_full = False,
         noise_on_the_spectrum = 5e-20,
         consistent_noise = True,
-        cont_filled = None,
+        cont_filled = cont_filled,
         constrained_prior = False,
         reds_of_galaxies = redshifts_of_mocks,
         dir_name = None,
