@@ -15,14 +15,15 @@ verify that dynesty got it right.
 import numpy as np
 import matplotlib.pyplot as plt
 import dynesty
-from main import _get_likelihood
-from venv.speed_up import get_content
+from venv.speed_up import get_content, calculate_taus_post
 from dynesty import plotting as dyplot
 from dynesty.utils import resample_equal
 from astropy.cosmology import Planck18 as Cosmo
 import astropy.units as u
 from venv.galaxy_prop import get_muv, get_mock_data, get_js, tau_CGM, p_EW
-from venv.helpers import z_at_proper_distance, full_res_flux, perturb_flux
+from venv.helpers import z_at_proper_distance, full_res_flux, perturb_flux, comoving_distance_from_source_Mpc
+from venv.igm_prop import tau_wv
+from sklearn.neighbors import KernelDensity
 # ── Ground truth and fake data ────────────────────────────────────────────────
 
 TRUE_MU = np.array([0,0,0,10])       # what we want to recover
@@ -95,18 +96,6 @@ la_e_orig = np.copy(la_e)
 la_e /= area_factor  # new improvement
 data = np.array(tau_data_I)
 
-bins_arr = np.linspace(
-        wave_em.value[0] * (1 + 7.5),
-        wave_em.value[-1] * (1 + 7.5),
-        11
-    )
-
-wave_em_dig_arr = np.digitize(
-        wave_em.value * (1 + 7.5),
-        bins_arr
-)
-
-
 flux_noise_mock = np.zeros(
     (
         N_DATA,
@@ -149,8 +138,8 @@ NDIM = 4
 # prior_transform converts a point u in [0,1]^N to physical parameters.
 # Here we use a wide uniform prior on each axis.
 
-PRIOR_LO = np.array([-10.0, -10.0, 10, 1])
-PRIOR_HI = np.array([ 10.0,  10.0, 10, 20])
+PRIOR_LO = np.array([-10.0, -10.0, -10.0, 1])
+PRIOR_HI = np.array([ 10.0,  10.0,  10.0, 20])
 
 def prior_transform(u):
     """Uniform prior: [0,1]^2  ->  [PRIOR_LO, PRIOR_HI]."""
@@ -181,58 +170,124 @@ cont_filled = get_content(
     #Tang_distr=False,
 )
 
-def log_likelihood(theta):
-    """Log p(data | theta): data is iid Gaussian around theta."""
-    #residuals = data - theta          # broadcast over N_DATA rows
-    return _get_likelihood(
-        None,
-        theta[0],
-        theta[1],
-        theta[2],
-        theta[3],
-        x_gal_mock,
-        y_gal_mock,
-        z_gal_mock,
-        data,
-        10,
-        redshift = 7.5,
-        muv = Muv_mock,
-        beta_data = beta,
-        la_e_in = la_e,
-        flux_int = flux_tau,
-        flux_limit = 2e-19,
-        like_on_flux = flux_noise_mock,
-        n_inside_tau = 10,
-        bins_tot = 11,
-        cache = False,
-        like_on_tau_full = False,
-        noise_on_the_spectrum = 5e-20,
-        consistent_noise = True,
-        cont_filled = cont_filled,
-        constrained_prior = False,
-        reds_of_galaxies = redshifts_of_mocks,
-        dir_name = None,
-        main_dir = main_dir,
-        cache_dir = None,
-        la_e_orig = la_e_orig,
-        prior_on_all = False,
-        wave_em_dig_arr=wave_em_dig_arr,
+N_BINS = 11         # fixed spectral bins matching flux_noise_mock
+NOISE = 5e-20       # per-pixel noise added to model spectra
+ADDITIVE = 1e-18    # additive offset before log-transform to avoid log(0)
+N_ITER_BUB = 10     # must match get_content call above
+N_INSIDE_TAU = 10   # must match get_content call above
+
+
+def get_spectral_likelihood(xb, yb, zb, rb):
+    """
+    Log-likelihood of observed spectra given bubble at (xb, yb, zb, rb).
+    Returns a scalar: sum of log-likelihoods over all galaxies and spectral bins.
+
+    For each galaxy:
+      1. Compute IGM optical depth for the main bubble geometry.
+      2. Build Monte Carlo ensemble of predicted spectra using precomputed
+         outside-bubble taus from cont_filled.
+      3. Fit a 1D KDE per spectral bin to the model predictions.
+      4. Evaluate the observed spectrum under the KDE and accumulate log-prob.
+    """
+    spec_res = wave_Lya.value * (1 + 7.5) / 2700
+    full_bins = np.arange(
+        wave_em.value[0] * (1 + 7.5),
+        wave_em.value[-1] * (1 + 7.5),
+        spec_res,
     )
-    #return -0.5 * np.sum((residuals / SIGMA) ** 2)
+    max_bins_full = len(full_bins)
 
-# ── Analytic answer (for comparison) ─────────────────────────────────────────
-#
-# With N iid Gaussian measurements and a flat prior the posterior is:
-#   mu_posterior = mean(data, axis=0)
-#   sigma_posterior = SIGMA / sqrt(N_DATA)
+    log_like = 0.0
 
-analytic_mean = data.mean(axis=0)
-#analytic_std  = SIGMA / np.sqrt(N_DATA)
+    for index_gal in range(N_DATA):
+        xg = x_gal_mock[index_gal]
+        yg = y_gal_mock[index_gal]
+        zg = z_gal_mock[index_gal]
+        red_s = redshifts_of_mocks[index_gal]
+        muvi = Muv_mock[index_gal]
 
-print("── Analytic answer ──────────────────────────────────")
-print(f"  True mu:           {TRUE_MU}")
-print(f"  Posterior mean:    {analytic_mean}")
-#print(f"  Posterior std:     {analytic_std}")
+        # Far edge of the main bubble along this galaxy's LOS
+        if (xg - xb)**2 + (yg - yb)**2 + (zg - zb)**2 < rb**2:
+            dist = zg - zb + np.sqrt(rb**2 - (xg - xb)**2 - (yg - yb)**2)
+            z_end_bub = z_at_proper_distance(dist / (1 + red_s) * u.Mpc, red_s)
+        else:
+            z_end_bub = red_s
+
+        tau_cgm_in = tau_CGM(muvi, main_dir=main_dir)
+
+        # Precompute area factors for all MC samples at once (vectorised over samples)
+        j_s_all = np.array(cont_filled.j_s_full[index_gal])     # (N_SAMPLES, 100)
+        area_factor_all = (
+            np.trapz(j_s_all * tau_cgm_in[np.newaxis, :], wave_em.value, axis=1) /
+            np.trapz(j_s_all, wave_em.value, axis=1)
+        )
+        area_factor_all = np.where(area_factor_all < 1e-20, 1e-5, area_factor_all)
+
+        flux_to_save = np.zeros((N_ITER_BUB * N_INSIDE_TAU, max_bins_full))
+
+        for n in range(N_ITER_BUB):
+            sl = slice(n * N_INSIDE_TAU, (n + 1) * N_INSIDE_TAU)
+
+            # Combine precomputed outside-bubble tau with main-bubble contribution
+            tau_now_i = np.copy(cont_filled.tau_prec_full[index_gal][sl, :])
+            tau_now_i += calculate_taus_post(
+                red_s,
+                z_end_bub,
+                np.copy(cont_filled.first_bubble_encounter_coord_z_up_full[index_gal][sl]),
+                np.copy(cont_filled.first_bubble_encounter_redshift_up_full[index_gal][sl]),
+                np.copy(cont_filled.first_bubble_encounter_coord_z_lo_full[index_gal][sl]),
+                np.copy(cont_filled.first_bubble_encounter_redshift_lo_full[index_gal][sl]),
+                n_iter=N_INSIDE_TAU,
+            )
+
+            # Tau sanity: replace non-monotonic rows with a smooth fallback
+            bad = np.any(tau_now_i[:, 30:] - tau_now_i[:, 29:-1] > 0.0, axis=1)
+            if np.any(bad):
+                dist_cm = comoving_distance_from_source_Mpc(red_s, z_end_bub)
+                fallback = np.clip(
+                    tau_wv(wave_em, dist=np.abs(dist_cm), zs=red_s, z_end=5.3, nf=0.65)
+                    + np.random.normal(0.0, 0.1),
+                    0, np.inf,
+                )
+                tau_now_i[bad] = fallback
+            tau_now_i[tau_now_i < 0] = np.inf
+            tau_now_i = np.nan_to_num(tau_now_i, nan=np.inf)
+
+            eit_l = np.exp(-tau_now_i)
+            lae_now = cont_filled.la_flux_out_full[index_gal][sl] / area_factor_all[sl]
+
+            continuum_i = (
+                lae_now[:, np.newaxis]
+                * j_s_all[sl]
+                * eit_l
+                * tau_cgm_in[np.newaxis, :]
+                * cont_filled.com_fact[index_gal]
+            )
+            flux_to_save[sl] = full_res_flux(continuum_i, 7.5)
+
+        # Add noise and rebin to the fixed N_BINS used for the observed data
+        noisy = flux_to_save + np.random.normal(0, NOISE, flux_to_save.shape)
+        predicted = perturb_flux(noisy, N_BINS)   # (n_samples, N_BINS)
+        observed = flux_noise_mock[index_gal]      # (N_BINS,)
+
+        # 1D KDE per bin in magnitude space, accumulate log-prob
+        for b in range(N_BINS):
+            model_mag = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted[:, b]))
+            obs_mag = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * observed[b]))
+            if not np.isfinite(obs_mag) or not np.all(np.isfinite(model_mag)):
+                continue
+            kde = KernelDensity(kernel='exponential', bandwidth=0.12).fit(
+                model_mag.reshape(-1, 1)
+            )
+            log_like += kde.score_samples([[obs_mag]])[0]
+
+    return log_like
+
+
+def log_likelihood(theta):
+    return get_spectral_likelihood(theta[0], theta[1], theta[2], theta[3])
+
+print(f"True bubble params (x, y, z, r): {TRUE_MU}")
 
 # ── Run dynesty ───────────────────────────────────────────────────────────────
 #
@@ -285,12 +340,12 @@ fig1.savefig("dynesty_run.png", dpi=150, bbox_inches="tight")
 # 2) Corner plot of the posterior
 fig2, axes2 = dyplot.cornerplot(
     results,
-    labels=[r"$\mu_x$", r"$\mu_y$"],
+    labels=[r"$x_\mathrm{bub}$", r"$y_\mathrm{bub}$", r"$z_\mathrm{bub}$", r"$r_\mathrm{bub}$"],
     truths=TRUE_MU,
     show_titles=True,
     quantiles=[0.16, 0.5, 0.84],
 )
-fig2.suptitle("Posterior: 2D Gaussian mean", y=1.02)
+fig2.suptitle("Posterior: Lyman-alpha bubble parameters", y=1.02)
 fig2.savefig("dynesty_corner.png", dpi=150, bbox_inches="tight")
 
 plt.show()

@@ -622,7 +622,7 @@ def _get_likelihood(
             for bin_i in range(2, bins_tot-1):
                 try:
                     data_to_get = 5 * np.log10(
-                        10**18.7 * (additive_factors[bin_i-2] + 2*spec_line[:, bin_i - 1, np.array(bins_likelihood[bin_i-2])]).T
+                        10**18.7 * (1e18 + 2*spec_line[:, bin_i]).T
                     )
                 except IndexError:
                     print("This is bin_i", bin_i)
@@ -650,19 +650,19 @@ def _get_likelihood(
                     print("where=nan?", np.where(np.isnan(data_to_get)), flush=True)
                     print("problematic values nans", spec_line[:, bin_i - 1, np.array(bins_likelihood[bin_i-2])].T[np.isnan(data_to_get)], flush=True)
                     raise TypeError
-                len_bin = len(np.array(bins_likelihood[bin_i-2]))
+                #len_bin = len(np.array(bins_likelihood[bin_i-2]))
                 data_to_eval = 5 * np.log10(
                     (10**18.7 * (
-                            additive_factors[bin_i-2] + 2*like_on_flux[ind_data][
-                                    bin_i - 1, np.array(bins_likelihood[bin_i-2])])
-                    ).reshape(1,len_bin)
+                            1e-18 + 2*like_on_flux[ind_data][
+                                    bin_i - 1])
+                    )#.reshape(1,len_bin)
                 )
                 # likelihood_spec[:ind_data, bin_i - 1] += np.log(
                 #     spec_kde.evaluate(
                 #         data_to_eval
                 #     )
                 # )
-                likelihood_spec[:ind_data+1, bin_i - 1] += spec_kde.score_samples(
+                likelihood_spec[:ind_data+1] += spec_kde.score_samples(
                     data_to_eval
                 )
 
@@ -670,15 +670,15 @@ def _get_likelihood(
                 for bin_i in range(2, bins_tot-1):
                     try:
                         data_to_get = 5 * np.log10(
-                            10**18.7 * (additive_factors[bin_i-2] + 2*spec_tot_cp[ind_data][:, bin_i - 1,
+                            10**18.7 * (1e-18 + 2*spec_tot_cp[ind_data][:, bin_i - 1,
                                         np.array(bins_likelihood[bin_i-2])]).T
                         )
                     except IndexError:
                         print("This is bin_i", bin_i)
                         print("There was an Index error for some reason:",
                             np.array(bins_likelihood[bin_i - 2]))
-                        print("all of them:", additive_factors)
-                        print("additive factor", additive_factors[bin_i-2])
+                        #print("all of them:", additive_factors)
+                        #print("additive factor", additive_factors[bin_i-2])
                         print(spec_tot_cp[ind_data][:, bin_i - 1,
                                         np.array(bins_likelihood[bin_i-2])])
                     #spec_kde = gaussian_kde(data_to_get, bw_method=0.25)
@@ -693,7 +693,7 @@ def _get_likelihood(
                     len_bin = len(np.array(bins_likelihood[bin_i - 2]))
                     data_to_eval = 5 * np.log10(
                         (10**18.7 * (
-                                additive_factors[bin_i-2] + 2*like_on_flux[ind_data][
+                                1e-18 + 2*like_on_flux[ind_data][
                                         bin_i - 1, np.array(bins_likelihood[bin_i-2])])
                         ).reshape(1,len_bin)
                     )
