@@ -34,11 +34,11 @@ wave_Lya = 1215.67 * u.Angstrom
 
 rng  = np.random.default_rng(42)
 
-Muv_mock = get_muv(
-                    n_gal=N_DATA,
-                    redshift=7.5,
-                    muv_cut=-18,
-                )
+Muv_mock = np.ones(N_DATA) * -18.5 #get_muv( #TODO:UVLF calculation needs to be improved
+                #     n_gal=N_DATA,
+                #     redshift=7.5,
+                #     muv_cut=-18,
+                # )
 beta = -2.0 * np.ones(N_DATA)
 tau_mock, x_gal_mock, y_gal_mock, z_gal_mock, x_bubbles_mock, y_bubbles_mock, z_bubbles_mock, r_bubs_mock = get_mock_data(
                 n_gal=N_DATA,
