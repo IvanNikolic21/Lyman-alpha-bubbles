@@ -133,9 +133,9 @@ flux_noise_mock[:,  :] = perturb_flux(
     full_flux_res, 11
 )
 
-data = rng.normal(TRUE_MU, SIGMA, size=(N_DATA, 2))   # shape (N_DATA, 2)
+#data = rng.normal(TRUE_MU, SIGMA, size=(N_DATA, 2))   # shape (N_DATA, 2)
 
-NDIM = 2
+NDIM = 4
 
 # ── Prior ─────────────────────────────────────────────────────────────────────
 #
