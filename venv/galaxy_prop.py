@@ -81,8 +81,8 @@ def get_js(
         tot_it_shape = (n_iter, *np.shape(muv))
     else:
         tot_it_shape = n_iter
-    delta_vs = np.zeros(np.product(tot_it_shape))
-    j_s = np.zeros((np.product(tot_it_shape), n_wav))
+    delta_vs = np.zeros(np.prod(tot_it_shape))
+    j_s = np.zeros((np.prod(tot_it_shape), n_wav))
 
     if include_muv_unc and hasattr(muv, '__len__'):
         muv = np.array([np.random.normal(i, 0.1) for i in muv])
@@ -409,7 +409,7 @@ def get_muv(
         if m < muv_cut:
             i = i - 1
             break
-    Uvlf_cumsum = integrate.cumtrapz(10 ** lf[0][i:80], Muv[0][i:80])
+    Uvlf_cumsum = integrate.cumulative_trapezoid(10 ** lf[0][i:80], Muv[0][i:80])
     cumsum = Uvlf_cumsum / Uvlf_cumsum[-1]
 
     random_numb = np.random.uniform(size=n_gal)
@@ -495,7 +495,7 @@ def p_EW(
         for i, (muvi, beti) in enumerate(zip(Muv, beta)):
 
             if Tang_distr:
-                EW_cumsum_tang = integrate.cumtrapz(
+                EW_cumsum_tang = integrate.cumulative_trapezoid(
                     p_Tang(Ws),
                     Ws
                 )
@@ -507,10 +507,10 @@ def p_EW(
 
             if np.random.binomial(1, A(muvi)):
                 if not gauss_distr:
-                    EW_cumsum = integrate.cumtrapz(
+                    EW_cumsum = integrate.cumulative_trapezoid(
                         1 / W(muvi) * np.exp(-Ws / W(muvi)), Ws)
                 else:
-                    EW_cumsum = integrate.cumtrapz(
+                    EW_cumsum = integrate.cumulative_trapezoid(
                         2 / np.sqrt(2 * np.pi) / W(muvi) * np.exp(
                             -0.5 * (Ws /W(muvi))**2
                         ),
@@ -539,7 +539,7 @@ def p_EW(
     else:
 
         if Tang_distr:
-            EW_cumsum_tang = integrate.cumtrapz(
+            EW_cumsum_tang = integrate.cumulative_trapezoid(
                 p_Tang(Ws),
                 Ws
             )
@@ -555,10 +555,10 @@ def p_EW(
 
         if np.random.binomial(1, A(Muv)):
             if not gauss_distr:
-                EW_cumsum = integrate.cumtrapz(1 / W(Muv) * np.exp(-Ws / W(Muv)),
+                EW_cumsum = integrate.cumulative_trapezoid(1 / W(Muv) * np.exp(-Ws / W(Muv)),
                                             Ws)
             else:
-                EW_cumsum = integrate.cumtrapz(
+                EW_cumsum = integrate.cumulative_trapezoid(
                     2 / np.sqrt(2 * np.pi) / W(Muv) * np.exp(
                         -0.5 * (Ws / W(Muv))**2
                     ),

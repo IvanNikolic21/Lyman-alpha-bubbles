@@ -430,14 +430,14 @@ def full_res_flux(
 
     #first let's check the shape
     shap = np.shape(continuum)
-    flux_full_res = np.zeros((np.product(shap[:-1]), len(bins)))
-    for ind in range(np.product(shap[:-1])):
+    flux_full_res = np.zeros((np.prod(shap[:-1]), len(bins)))
+    for ind in range(np.prod(shap[:-1])):
         flux_full_res[ind] = [
             np.trapz(
                 x=wave_em.value[wave_em_dig == i + 1],
                 y=(
                     continuum.reshape(
-                        np.product(shap[:-1]),100
+                        np.prod(shap[:-1]),100
                     )[ind][wave_em_dig == i + 1])
             )
             for i in range(len(bins))
@@ -471,7 +471,7 @@ def perturb_flux(
     )
     wave_em_dig_rebin = np.digitize(bins, bins_rebin)
     full_res_shape = np.shape(full_res)
-    full_res_resh = full_res.reshape((np.product(full_res_shape[:-1]), -1))
+    full_res_resh = full_res.reshape((np.prod(full_res_shape[:-1]), -1))
     if gaussian_filter:
         flux_0 = np.array(
             [scipy.ndimage.gaussian_filter(np.array(full_res_resh[i]), 1) for i in
