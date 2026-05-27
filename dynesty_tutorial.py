@@ -173,7 +173,7 @@ cont_filled = get_content(
     main_dir=main_dir,
     cache_dir=None,
     gauss_distr=False,
-    Tang_distr=False,
+    #Tang_distr=False,
 )
 
 def log_likelihood(theta):
