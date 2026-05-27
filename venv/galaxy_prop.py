@@ -104,7 +104,7 @@ def get_js(
         else:
             sigma=delta_vs[i]
         j_s[i, :] = gaussian(wv_off.value, delta_vs[i], sigma)
-        j_s[i, :] /= integrate.trapz(
+        j_s[i, :] /= integrate.trapezoid(
             j_s[i, :],
             wave_em.value
         )

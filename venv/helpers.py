@@ -394,14 +394,14 @@ def hmf_integral_gtm(M, dndm, mass_density=False):
     if not mass_density:
         ngtm = np.concatenate(
             (
-                intg.cumtrapz(dndlnm[::-1], dx=np.log(m[1]) - np.log(m[0]))[::-1],
+                intg.cumulative_trapezoid(dndlnm[::-1], dx=np.log(m[1]) - np.log(m[0]))[::-1],
                 np.zeros(1),
             )
         )
     else:
         ngtm = np.concatenate(
             (
-                intg.cumtrapz(m[::-1] * dndlnm[::-1], dx=np.log(m[1]) - np.log(m[0]))[
+                intg.cumulative_trapezoid(m[::-1] * dndlnm[::-1], dx=np.log(m[1]) - np.log(m[0]))[
                     ::-1
                 ],
                 np.zeros(1),
