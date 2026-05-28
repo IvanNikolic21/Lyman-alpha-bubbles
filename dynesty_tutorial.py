@@ -12,9 +12,11 @@ This toy problem has an analytic answer, so you can immediately
 verify that dynesty got it right.
 """
 
+import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 import dynesty
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 from venv.speed_up import get_content, calculate_taus_post
 from dynesty import plotting as dyplot
 from dynesty.utils import resample_equal
@@ -28,7 +30,7 @@ from sklearn.neighbors import KernelDensity
 
 TRUE_MU = np.array([0,0,0,10])       # what we want to recover
 #SIGMA   = np.array([0.5,  0.8])       # known measurement noise (per axis)
-N_DATA  = 50
+N_DATA  = 10   # 50 for production; 10 for a quick test run
 main_dir='/groups/astro/ivannik/programs/Lyman-alpha-bubbles/'
 wave_em = np.linspace(1214, 1225., 100) * u.Angstrom
 wave_Lya = 1215.67 * u.Angstrom
@@ -287,7 +289,8 @@ def get_spectral_likelihood(xb, yb, zb, rb):
 def log_likelihood(theta):
     return get_spectral_likelihood(theta[0], theta[1], theta[2], theta[3])
 
-print(f"True bubble params (x, y, z, r): {TRUE_MU}")
+print(f"True bubble params (x, y, z, r): {TRUE_MU}", flush=True)
+print("Starting dynesty sampler...", flush=True)
 
 # ── Run dynesty ───────────────────────────────────────────────────────────────
 #
@@ -302,10 +305,10 @@ sampler = dynesty.NestedSampler(
     log_likelihood,
     prior_transform,
     ndim=NDIM,
-    nlive=300,
+    nlive=100,   # 300 for production; 100 for quick test
 )
 
-sampler.run_nested(print_progress=True)
+sampler.run_nested(print_progress=True, dlogz=0.5)
 results = sampler.results
 
 # ── Extract results ───────────────────────────────────────────────────────────
