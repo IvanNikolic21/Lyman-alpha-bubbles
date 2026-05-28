@@ -94,22 +94,28 @@ def get_js(
     else:
         delta_v_mean = delta_v_func(muv, z)
 
-    for i in range(n_iter):
-        if hasattr(muv, '__len__'):
-            delta_vs[i] = 10**normal(delta_v_mean[i], 0.24)
-        else:
-            delta_vs[i] = 10**normal(delta_v_mean, 0.24)
+    if not hasattr(muv, '__len__'):
+        # Scalar muv: generate all n_iter samples at once with broadcasting
+        delta_vs = 10 ** np.random.normal(delta_v_mean, 0.24, size=n_iter)
         if fwhm_true:
-            sigma=delta_vs[i] / 2 / np.sqrt(2 * np.log(2))
+            sigmas = delta_vs / (2 * np.sqrt(2 * np.log(2)))
         else:
-            sigma=delta_vs[i]
-        j_s[i, :] = gaussian(wv_off.value, delta_vs[i], sigma)
-        j_s[i, :] /= integrate.trapezoid(
-            j_s[i, :],
-            wave_em.value
-        )
-
-    if hasattr(muv, '__len__'):
+            sigmas = delta_vs
+        x = wv_off.value[np.newaxis, :]      # (1, 100)
+        mu = delta_vs[:, np.newaxis]          # (n_iter, 1)
+        sig = sigmas[:, np.newaxis]           # (n_iter, 1)
+        j_s = 1 / (np.sqrt(2 * np.pi) * sig) * np.exp(-0.5 * ((x - mu) / sig) ** 2)
+        norms = np.trapz(j_s, wave_em.value, axis=1)
+        j_s /= norms[:, np.newaxis]
+    else:
+        for i in range(n_iter):
+            delta_vs[i] = 10 ** normal(delta_v_mean[i], 0.24)
+            if fwhm_true:
+                sigma = delta_vs[i] / (2 * np.sqrt(2 * np.log(2)))
+            else:
+                sigma = delta_vs[i]
+            j_s[i, :] = gaussian(wv_off.value, delta_vs[i], sigma)
+            j_s[i, :] /= integrate.trapezoid(j_s[i, :], wave_em.value)
         j_s.reshape((*tot_it_shape, n_wav))
         delta_vs.reshape(tot_it_shape)
 
@@ -579,28 +585,25 @@ def p_EW(
                 return 0.
 
 
+_tau_cgm_data_cache = {}
+
 def tau_CGM(
         Muv,
         main_dir='/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles'
 ):
-    Muvs = np.load(main_dir + '/venv/data/Muv.npy')
-    mh = np.load(main_dir + '/venv/data/mh.npy')
+    if main_dir not in _tau_cgm_data_cache:
+        _tau_cgm_data_cache[main_dir] = (
+            np.load(main_dir + '/venv/data/Muv.npy'),
+            np.load(main_dir + '/venv/data/mh.npy'),
+        )
+    Muvs, mh = _tau_cgm_data_cache[main_dir]
     mh_now = np.interp(Muv, np.flip(Muvs), np.flip(mh))
-    v_c = ((10 * const.G * mh_now*u.M_sun * Cosmo.H(7.5))**( 1/3)).to(u.km/u.s).value
+    v_c = ((10 * const.G * mh_now * u.M_sun * Cosmo.H(7.5)) ** (1/3)).to(u.km/u.s).value
+    wv_offsets = wave_to_dv(wave_em).value  # shape (100,)
     if hasattr(Muv, '__len__'):
-        tau_CGM_ = np.ones((len(Muv),100))
-        for imi,mi in enumerate(Muv):
-            for i_w,wv in enumerate(wave_em):
-                if wave_to_dv(wv).value < v_c[imi]:
-                    tau_CGM_[imi,i_w] = 0.0
-
+        tau_CGM_ = (wv_offsets[np.newaxis, :] >= v_c[:, np.newaxis]).astype(float)
     else:
-        tau_CGM_ = np.ones(100)
-        for i_w, wv in enumerate(wave_em):
-            if wave_to_dv(wv).value < v_c:
-                tau_CGM_[i_w] = 0.0
-            else:
-                break
+        tau_CGM_ = (wv_offsets >= v_c).astype(float)
     return tau_CGM_
 
 

@@ -721,10 +721,7 @@ def tau_wv(
         z_end=5.3,
         nf=0.5
 ):
-    z_b1 = z_at_value(
-        Cosmo.comoving_distance,
-        Cosmo.comoving_distance(zs) - dist*u.Mpc
-    )
+    z_b1 = z_at_proper_distance(dist / (1 + zs) * u.Mpc, zs)
     z = wv.value/1216 * (1+zs) - 1
     tau_gp = 7.16 * 1e5 * ((1+zs)/10)**1.5
     r_alpha = 6.25 * 1e8 / (4 * np.pi * freq_Lya.value)

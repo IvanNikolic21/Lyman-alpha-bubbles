@@ -166,17 +166,12 @@ def get_content(
             y_out_gal_i.append(y_outs)
             z_out_gal_i.append(z_outs)
             r_out_gal_i.append(r_bubs)
-            #if not AH22_model:
-            lae_now_i = np.array(
-                [p_EW(
-                    muv_i,
-                    beti,
-                    high_prob_emit=high_prob_emit,
-                    EW_fixed=EW_fixed,
-                    #gauss_distr=gauss_distr,
-                )[1] for blah in range(n_inside_tau)]
-            ) #this is changed, no more gaussian distribution here so that I
-            # can succesfully perform an out-of-distribution check.
+            _, lae_now_i = p_EW(
+                np.full(n_inside_tau, muv_i),
+                np.full(n_inside_tau, beti),
+                high_prob_emit=high_prob_emit,
+                EW_fixed=EW_fixed,
+            )
             #else:
             #    lae_now_i = np.array(
             #        [L_intr_AH22(muv_i) for blah in range(n_inside_tau)]
@@ -507,62 +502,30 @@ def calculate_taus_post(
         n_iter=500,
 ):
     z = wave_em.value / 1215.67 * (1 + z_source) - 1
-    one_over_onepz = 1 / (1 + z)
-
+    one_over_onepz = 1 / (1 + z)          # (100,)
     tau_gp = 7.16 * 1e5 * ((1 + z_source) / 10) ** 1.5
     tau_pref = tau_gp * r_alpha / np.pi
     taus = np.zeros((n_iter, len(wave_em)))
-    for index_iter in range(n_iter):
-        z_up_i = first_bubble_encounter_coord_z_up[index_iter]
-        z_lo_i = first_bubble_encounter_coord_z_lo[index_iter]
-        red_up_i = first_bubble_encounter_redshift_up[index_iter]
-        red_lo_i = first_bubble_encounter_redshift_lo[index_iter]
-        tau_i = np.zeros((len(wave_em)))
-        if z_up_i == np.inf:
 
-            dist = comoving_distance_from_source_Mpc(z_source, z_end_bubble)
-            taus[index_iter, :] = tau_wv(
-                wave_em,
-                dist=np.abs(dist),
-                zs=z_source,
-                z_end=5.3,
-                nf=0.65
-            )
-            # no intersections for this iter, already calculated
+    z_up = first_bubble_encounter_coord_z_up   # (n_iter,)
+    z_lo = first_bubble_encounter_coord_z_lo   # (n_iter,)
+    red_up = first_bubble_encounter_redshift_up  # (n_iter,)
 
-        else:
-            if z_up_i < 0 and z_lo_i < 0:
-                print("wrong bubble, it's above the galaxy.")
-                raise ValueError
-            if z_up_i < 0 < z_lo_i:
-                # I think I need to work a bit more on the case where the small
-                # ionized bubble intersects the main bubble.
-                if red_up_i > z_end_bubble and red_lo_i < z_end_bubble:
-                    # already taken into account
-                    pass
-                elif red_lo_i > z_end_bubble:
-                    pass
-                    #print("Some big problem, small bubble completely inside big")
-                    #print(red_lo_i, red_up_i, z_lo_i, z_up_i, z_end_bubble)
-                    # raise ValueError(
-                    #     "Some big problem, small bubble completely inside big?!"
-                    # )
-                    # This thing happens, it seems like. I'll investigate in post
-                    #processing when it happens. For now, I'll just assume this
-                    #is not a significant issue and ignore it.
-            else:
-                z_bi = z_end_bubble
-                z_ei = red_up_i
-                zb_ar = (1 + z_bi) * one_over_onepz
-                tau_i = tau_pref * zb_ar ** 1.5 * (
-                        I(zb_ar) - I((1 + z_ei) * one_over_onepz)
-                )
-            try:
-                taus[index_iter, :] = tau_i
-            except IndexError:
-                if n_iter == 1:
-                    taus = tau_i
-                else:
-                    raise IndexError("Something else")
-    taus = taus.flatten()
-    return taus.reshape((n_iter, len(wave_em)))
+    # Rows where no outside-bubble intersection was found → fall back to tau_wv
+    mask_inf = (z_up == np.inf)
+    if np.any(mask_inf):
+        dist = comoving_distance_from_source_Mpc(z_source, z_end_bubble)
+        tau_fallback = tau_wv(wave_em, dist=np.abs(dist), zs=z_source, z_end=5.3, nf=0.65)
+        taus[mask_inf] = tau_fallback   # broadcasts (100,) → (K, 100)
+
+    # Normal rows: outside bubble sits cleanly in front of the main bubble
+    # Partial-overlap case (z_up < 0 < z_lo) stays zero — same as original behaviour
+    mask_normal = (~mask_inf) & ~((z_up < 0) & (z_lo > 0))
+    if np.any(mask_normal):
+        zb_ar = (1 + z_end_bubble) * one_over_onepz   # (100,)
+        z_ei = red_up[mask_normal][:, np.newaxis]       # (K, 1)
+        taus[mask_normal] = tau_pref * zb_ar[np.newaxis, :] ** 1.5 * (
+            I(zb_ar[np.newaxis, :]) - I((1 + z_ei) * one_over_onepz[np.newaxis, :])
+        )
+
+    return taus

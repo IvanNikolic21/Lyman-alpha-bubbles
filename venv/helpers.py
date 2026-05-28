@@ -427,21 +427,21 @@ def full_res_flux(
     wave_em_dig = np.digitize(wave_em.value * (1 + redshift), bins)
     bins_po = np.append(bins, bins[-1] + spec_res)
 
-    #first let's check the shape
     shap = np.shape(continuum)
-    flux_full_res = np.zeros((np.prod(shap[:-1]), len(bins)))
-    for ind in range(np.prod(shap[:-1])):
-        flux_full_res[ind] = [
-            np.trapz(
-                x=wave_em.value[wave_em_dig == i + 1],
-                y=(
-                    continuum.reshape(
-                        np.prod(shap[:-1]),100
-                    )[ind][wave_em_dig == i + 1])
+    n_samples = np.prod(shap[:-1])
+    cont_flat = continuum.reshape(n_samples, 100)
+    wave_vals = wave_em.value
+    n_bins = len(bins)
+    flux_full_res = np.zeros((n_samples, n_bins))
+    for i in range(n_bins):
+        mask = (wave_em_dig == i + 1)
+        if np.any(mask):
+            flux_full_res[:, i] = np.trapz(
+                x=wave_vals[mask],
+                y=cont_flat[:, mask],
+                axis=1,
             )
-            for i in range(len(bins))
-        ]
-    return flux_full_res.reshape((*list(shap[:-1]),-1))
+    return flux_full_res.reshape((*list(shap[:-1]), -1))
 
 def perturb_flux(
         full_res,
