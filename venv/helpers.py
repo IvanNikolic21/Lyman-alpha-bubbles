@@ -1,7 +1,6 @@
 from astropy import constants as const
 from astropy import units as u
 import numpy as np
-from astropy.cosmology import Planck15
 from astropy.cosmology import Planck18 as Cosmo
 from scipy.interpolate import InterpolatedUnivariateSpline as _spline
 import scipy.integrate as intg
@@ -20,7 +19,7 @@ def comoving_distance_from_source_Mpc(z_2, z_1):
     """
     COMOVING distance between z_1 and z_2
     """
-    R_com = (z_1 - z_2)*(const.c / Planck15.H(z=z_1)).to(u.Mpc)
+    R_com = (z_1 - z_2)*(const.c / Cosmo.H(z_1)).to(u.Mpc)
     return R_com
 
 
@@ -59,7 +58,7 @@ def gaussian(
 
 
 def dt_dz_func(z):
-    return 1. / ((1. + z) * Planck15.H(z))
+    return 1. / ((1. + z) * Cosmo.H(z))
 
 
 class LyaCrossSection(object):
@@ -173,7 +172,7 @@ class LyaCrossSection(object):
         for uniform IGM
         tau = πe^2/(m_e c) * f_alpha lambda_alpha * n_HI/H(z)
         """
-        tau = 1.34e-17 * u.cm ** 3 / u.s * Planck15.H(z).to(1. / u.s) * n_hi
+        tau = 1.34e-17 * u.cm ** 3 / u.s * Cosmo.H(z).to(1. / u.s) * n_hi
 
         return tau.value
 
@@ -188,7 +187,7 @@ def n_h(z, x_p=0.75):
     Cen & Haiman 2000::
     >>> 8.5e-5 * ((1. + z)/8.)**3. / (u.cm**3.)
     """
-    return (x_p * Planck15.Ob0 * Planck15.critical_density0 * (1+z)**3.
+    return (x_p * Cosmo.Ob0 * Cosmo.critical_density0 * (1+z)**3.
             / const.m_p).to(u.cm**(-3.))
 
 
@@ -327,7 +326,7 @@ def optical_depth(
 
 
 def z_at_proper_distance(R_p, z_1=7.):
-    R_H = (const.c / Cosmo.H(z=z_1)).to(u.Mpc)
+    R_H = (const.c / Cosmo.H(z_1)).to(u.Mpc)
     R_com = R_p * (1+z_1)
     return z_1 - R_com/R_H
 
@@ -487,5 +486,5 @@ def comoving_distance_from_source_Mpc(z_2, z_1):
     """
     COMOVING distance between z_1 and z_2. z_1 > z_2
     """
-    R_com = (z_1 - z_2)*(const.c / Planck15.H(z=z_1)).to(u.Mpc)
+    R_com = (z_1 - z_2)*(const.c / Cosmo.H(z_1)).to(u.Mpc)
     return R_com.value
