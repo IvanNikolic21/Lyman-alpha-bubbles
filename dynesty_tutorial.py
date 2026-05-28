@@ -12,6 +12,7 @@ This toy problem has an analytic answer, so you can immediately
 verify that dynesty got it right.
 """
 
+import os
 import warnings
 import multiprocessing as mp
 import numpy as np
@@ -27,7 +28,7 @@ import astropy.units as u
 from venv.galaxy_prop import get_muv, get_mock_data, get_js, tau_CGM, p_EW
 from venv.helpers import full_res_flux, perturb_flux, comoving_distance_from_source_Mpc, z_at_proper_distance
 from venv.igm_prop import tau_wv
-from sklearn.neighbors import KernelDensity
+from scipy.special import logsumexp
 # ── Ground truth and fake data ────────────────────────────────────────────────
 
 TRUE_MU = np.array([0,0,0,10])       # what we want to recover
@@ -159,7 +160,7 @@ cont_filled = get_content(
     y_gal_mock,
     z_gal_mock,
     n_iter_bub=1,
-    n_inside_tau=1,
+    n_inside_tau=50,
     include_muv_unc=False,
     fwhm_true=False,
     redshift=7.5,
@@ -178,7 +179,8 @@ N_BINS = 11         # fixed spectral bins matching flux_noise_mock
 NOISE = 5e-20       # per-pixel noise added to model spectra
 ADDITIVE = 1e-18    # additive offset before log-transform to avoid log(0)
 N_ITER_BUB = 1     # must match get_content call above
-N_INSIDE_TAU = 1   # must match get_content call above
+N_INSIDE_TAU = 50  # must match get_content call above
+BW_KDE = 0.12      # Gaussian KDE bandwidth in magnitude space
 N_WORKERS = 4       # parallel likelihood evaluations via multiprocessing
 
 # ── Quantities that don't depend on bubble params — precompute once ───────────
@@ -289,17 +291,21 @@ def get_spectral_likelihood(xb, yb, zb, rb):
             flux_to_save[sl] = full_res_flux(continuum_i, 7.5)
 
         noisy = flux_to_save + np.random.normal(0, NOISE, flux_to_save.shape)
-        predicted = perturb_flux(noisy, N_BINS)   # (n_samples, N_BINS)
+        predicted = perturb_flux(noisy, N_BINS)   # (N_INSIDE_TAU, N_BINS)
 
-        for b in range(N_BINS):
-            model_mag = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted[:, b]))
-            obs_mag = _obs_mag_per_gal[index_gal, b]
-            if not np.isfinite(obs_mag) or not np.all(np.isfinite(model_mag)):
-                continue
-            kde = KernelDensity(kernel='exponential', bandwidth=0.12).fit(
-                model_mag.reshape(-1, 1)
-            )
-            log_like += kde.score_samples([[obs_mag]])[0]
+        model_mags = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted))  # (N_INSIDE_TAU, N_BINS)
+        obs_mags = _obs_mag_per_gal[index_gal]                             # (N_BINS,)
+
+        valid = np.isfinite(obs_mags) & np.all(np.isfinite(model_mags), axis=0)
+        if np.any(valid):
+            diffs = obs_mags[valid] - model_mags[:, valid]  # (N_INSIDE_TAU, n_valid)
+            log_kde = (
+                logsumexp(-0.5 * (diffs / BW_KDE) ** 2, axis=0)
+                - np.log(N_INSIDE_TAU)
+                - np.log(BW_KDE)
+                - 0.5 * np.log(2 * np.pi)
+            )                                                # (n_valid,)
+            log_like += np.sum(log_kde)
 
     return log_like
 
@@ -319,16 +325,27 @@ print("Starting dynesty sampler...", flush=True)
 # nlive: number of live points. More = more accurate but slower.
 #        ~200-500 is fine for low-dimensional problems.
 
+CHECKPOINT_FILE = 'dynesty_checkpoint.pkl'
+
 with mp.get_context('fork').Pool(N_WORKERS) as pool:
-    sampler = dynesty.NestedSampler(
-        log_likelihood,
-        prior_transform,
-        ndim=NDIM,
-        nlive=100,   # 300 for production; 100 for quick test
-        pool=pool,
-        queue_size=N_WORKERS,
+    if os.path.exists(CHECKPOINT_FILE):
+        print(f"Resuming from {CHECKPOINT_FILE}", flush=True)
+        sampler = dynesty.NestedSampler.restore(CHECKPOINT_FILE, pool=pool)
+    else:
+        sampler = dynesty.NestedSampler(
+            log_likelihood,
+            prior_transform,
+            ndim=NDIM,
+            nlive=100,   # 300 for production; 100 for quick test
+            pool=pool,
+            queue_size=N_WORKERS,
+        )
+    sampler.run_nested(
+        print_progress=True,
+        dlogz=0.5,
+        checkpoint_file=CHECKPOINT_FILE,
+        checkpoint_every=100,
     )
-    sampler.run_nested(print_progress=True, dlogz=0.5)
 results = sampler.results
 
 # ── Extract results ───────────────────────────────────────────────────────────
