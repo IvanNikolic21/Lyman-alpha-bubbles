@@ -13,6 +13,7 @@ verify that dynesty got it right.
 """
 
 import warnings
+import multiprocessing as mp
 import numpy as np
 import matplotlib.pyplot as plt
 import dynesty
@@ -21,9 +22,10 @@ from venv.speed_up import get_content, calculate_taus_post
 from dynesty import plotting as dyplot
 from dynesty.utils import resample_equal
 from astropy.cosmology import Planck18 as Cosmo
+from astropy import constants as const
 import astropy.units as u
 from venv.galaxy_prop import get_muv, get_mock_data, get_js, tau_CGM, p_EW
-from venv.helpers import z_at_proper_distance, full_res_flux, perturb_flux, comoving_distance_from_source_Mpc
+from venv.helpers import full_res_flux, perturb_flux, comoving_distance_from_source_Mpc, z_at_proper_distance
 from venv.igm_prop import tau_wv
 from sklearn.neighbors import KernelDensity
 # ── Ground truth and fake data ────────────────────────────────────────────────
@@ -177,28 +179,55 @@ NOISE = 5e-20       # per-pixel noise added to model spectra
 ADDITIVE = 1e-18    # additive offset before log-transform to avoid log(0)
 N_ITER_BUB = 1     # must match get_content call above
 N_INSIDE_TAU = 1   # must match get_content call above
+N_WORKERS = 4       # parallel likelihood evaluations via multiprocessing
+
+# ── Quantities that don't depend on bubble params — precompute once ───────────
+
+# Full-resolution spectral grid (fixed redshift = 7.5)
+_spec_res = wave_Lya.value * (1 + 7.5) / 2700
+_full_bins = np.arange(
+    wave_em.value[0] * (1 + 7.5),
+    wave_em.value[-1] * (1 + 7.5),
+    _spec_res,
+)
+_max_bins_full = len(_full_bins)
+
+# Hubble radius per galaxy: R_H = c/H(z) in Mpc.
+# Used to inline z_at_proper_distance without calling Cosmo.H() on every likelihood call.
+_R_H_per_gal = np.array([
+    (const.c / Cosmo.H(redshifts_of_mocks[i])).to(u.Mpc).value
+    for i in range(N_DATA)
+])
+
+# CGM transmission per galaxy — depends only on fixed Muv, not on bubble params
+_tau_cgm_per_gal = np.array([
+    tau_CGM(Muv_mock[i], main_dir=main_dir)
+    for i in range(N_DATA)
+])  # (N_DATA, 100)
+
+# Line-profile arrays stacked for all galaxies
+_j_s_per_gal = np.array([
+    cont_filled.j_s_full[i]
+    for i in range(N_DATA)
+])  # (N_DATA, N_SAMPLES, 100)
+
+# Area factors per galaxy — ∫(J·τ_CGM)/∫J, also fixed
+_raw_af = np.array([
+    np.trapz(_j_s_per_gal[i] * _tau_cgm_per_gal[i], wave_em.value, axis=1) /
+    np.trapz(_j_s_per_gal[i], wave_em.value, axis=1)
+    for i in range(N_DATA)
+])  # (N_DATA, N_SAMPLES)
+_area_factor_per_gal = np.where(_raw_af < 1e-20, 1e-5, _raw_af)
+
+# Observed spectra converted to magnitude space — avoids log10 in every call
+_obs_mag_per_gal = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * flux_noise_mock))  # (N_DATA, N_BINS)
 
 
 def get_spectral_likelihood(xb, yb, zb, rb):
     """
     Log-likelihood of observed spectra given bubble at (xb, yb, zb, rb).
     Returns a scalar: sum of log-likelihoods over all galaxies and spectral bins.
-
-    For each galaxy:
-      1. Compute IGM optical depth for the main bubble geometry.
-      2. Build Monte Carlo ensemble of predicted spectra using precomputed
-         outside-bubble taus from cont_filled.
-      3. Fit a 1D KDE per spectral bin to the model predictions.
-      4. Evaluate the observed spectrum under the KDE and accumulate log-prob.
     """
-    spec_res = wave_Lya.value * (1 + 7.5) / 2700
-    full_bins = np.arange(
-        wave_em.value[0] * (1 + 7.5),
-        wave_em.value[-1] * (1 + 7.5),
-        spec_res,
-    )
-    max_bins_full = len(full_bins)
-
     log_like = 0.0
 
     for index_gal in range(N_DATA):
@@ -206,31 +235,24 @@ def get_spectral_likelihood(xb, yb, zb, rb):
         yg = y_gal_mock[index_gal]
         zg = z_gal_mock[index_gal]
         red_s = redshifts_of_mocks[index_gal]
-        muvi = Muv_mock[index_gal]
 
         # Far edge of the main bubble along this galaxy's LOS
+        # z_at_proper_distance inlined: z_end = z_s - R_com/R_H = z_s - dist/R_H
         if (xg - xb)**2 + (yg - yb)**2 + (zg - zb)**2 < rb**2:
             dist = zg - zb + np.sqrt(rb**2 - (xg - xb)**2 - (yg - yb)**2)
-            z_end_bub = z_at_proper_distance(dist / (1 + red_s) * u.Mpc, red_s)
+            z_end_bub = red_s - dist / _R_H_per_gal[index_gal]
         else:
             z_end_bub = red_s
 
-        tau_cgm_in = tau_CGM(muvi, main_dir=main_dir)
+        tau_cgm_in = _tau_cgm_per_gal[index_gal]       # (100,)
+        j_s_all = _j_s_per_gal[index_gal]              # (N_SAMPLES, 100)
+        area_factor_all = _area_factor_per_gal[index_gal]  # (N_SAMPLES,)
 
-        # Precompute area factors for all MC samples at once (vectorised over samples)
-        j_s_all = np.array(cont_filled.j_s_full[index_gal])     # (N_SAMPLES, 100)
-        area_factor_all = (
-            np.trapz(j_s_all * tau_cgm_in[np.newaxis, :], wave_em.value, axis=1) /
-            np.trapz(j_s_all, wave_em.value, axis=1)
-        )
-        area_factor_all = np.where(area_factor_all < 1e-20, 1e-5, area_factor_all)
-
-        flux_to_save = np.zeros((N_ITER_BUB * N_INSIDE_TAU, max_bins_full))
+        flux_to_save = np.zeros((N_ITER_BUB * N_INSIDE_TAU, _max_bins_full))
 
         for n in range(N_ITER_BUB):
             sl = slice(n * N_INSIDE_TAU, (n + 1) * N_INSIDE_TAU)
 
-            # Combine precomputed outside-bubble tau with main-bubble contribution
             tau_now_i = np.copy(cont_filled.tau_prec_full[index_gal][sl, :])
             tau_now_i += calculate_taus_post(
                 red_s,
@@ -242,7 +264,6 @@ def get_spectral_likelihood(xb, yb, zb, rb):
                 n_iter=N_INSIDE_TAU,
             )
 
-            # Tau sanity: replace non-monotonic rows with a smooth fallback
             bad = np.any(tau_now_i[:, 30:] - tau_now_i[:, 29:-1] > 0.0, axis=1)
             if np.any(bad):
                 dist_cm = comoving_distance_from_source_Mpc(red_s, z_end_bub)
@@ -267,15 +288,12 @@ def get_spectral_likelihood(xb, yb, zb, rb):
             )
             flux_to_save[sl] = full_res_flux(continuum_i, 7.5)
 
-        # Add noise and rebin to the fixed N_BINS used for the observed data
         noisy = flux_to_save + np.random.normal(0, NOISE, flux_to_save.shape)
         predicted = perturb_flux(noisy, N_BINS)   # (n_samples, N_BINS)
-        observed = flux_noise_mock[index_gal]      # (N_BINS,)
 
-        # 1D KDE per bin in magnitude space, accumulate log-prob
         for b in range(N_BINS):
             model_mag = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted[:, b]))
-            obs_mag = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * observed[b]))
+            obs_mag = _obs_mag_per_gal[index_gal, b]
             if not np.isfinite(obs_mag) or not np.all(np.isfinite(model_mag)):
                 continue
             kde = KernelDensity(kernel='exponential', bandwidth=0.12).fit(
@@ -301,14 +319,16 @@ print("Starting dynesty sampler...", flush=True)
 # nlive: number of live points. More = more accurate but slower.
 #        ~200-500 is fine for low-dimensional problems.
 
-sampler = dynesty.NestedSampler(
-    log_likelihood,
-    prior_transform,
-    ndim=NDIM,
-    nlive=100,   # 300 for production; 100 for quick test
-)
-
-sampler.run_nested(print_progress=True, dlogz=0.5)
+with mp.get_context('fork').Pool(N_WORKERS) as pool:
+    sampler = dynesty.NestedSampler(
+        log_likelihood,
+        prior_transform,
+        ndim=NDIM,
+        nlive=100,   # 300 for production; 100 for quick test
+        pool=pool,
+        queue_size=N_WORKERS,
+    )
+    sampler.run_nested(print_progress=True, dlogz=0.5)
 results = sampler.results
 
 # ── Extract results ───────────────────────────────────────────────────────────
