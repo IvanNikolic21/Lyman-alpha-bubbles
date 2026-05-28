@@ -154,8 +154,8 @@ cont_filled = get_content(
     x_gal_mock,
     y_gal_mock,
     z_gal_mock,
-    n_iter_bub=10,
-    n_inside_tau=10,
+    n_iter_bub=1,
+    n_inside_tau=1,
     include_muv_unc=False,
     fwhm_true=False,
     redshift=7.5,
@@ -173,8 +173,8 @@ cont_filled = get_content(
 N_BINS = 11         # fixed spectral bins matching flux_noise_mock
 NOISE = 5e-20       # per-pixel noise added to model spectra
 ADDITIVE = 1e-18    # additive offset before log-transform to avoid log(0)
-N_ITER_BUB = 10     # must match get_content call above
-N_INSIDE_TAU = 10   # must match get_content call above
+N_ITER_BUB = 1     # must match get_content call above
+N_INSIDE_TAU = 1   # must match get_content call above
 
 
 def get_spectral_likelihood(xb, yb, zb, rb):
