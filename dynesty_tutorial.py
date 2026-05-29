@@ -224,90 +224,114 @@ _area_factor_per_gal = np.where(_raw_af < 1e-20, 1e-5, _raw_af)
 # Observed spectra converted to magnitude space — avoids log10 in every call
 _obs_mag_per_gal = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * flux_noise_mock))  # (N_DATA, N_BINS)
 
+# Trapz-weight matrix: continuum (N, 100) @ _trapz_weights → (N, _max_bins_full)
+# Replaces the per-bin loop inside full_res_flux — one matmul per likelihood call.
+_wave_em_dig_full = np.digitize(wave_em.value * (1 + 7.5), _full_bins)
+_trapz_weights = np.zeros((100, _max_bins_full))
+for _i in range(_max_bins_full):
+    _idx = np.where(_wave_em_dig_full == _i + 1)[0]
+    if len(_idx) < 2:
+        continue
+    _x = wave_em.value[_idx]
+    _w = np.empty(len(_idx))
+    _w[0] = (_x[1] - _x[0]) / 2
+    _w[-1] = (_x[-1] - _x[-2]) / 2
+    if len(_idx) > 2:
+        _w[1:-1] = (_x[2:] - _x[:-2]) / 2
+    _trapz_weights[_idx, _i] = _w
+
+# Rebinning matrix: flux (N, _max_bins_full) @ _rebin_matrix → (N, N_BINS)
+# Replaces the per-bin list comprehension inside perturb_flux — one matmul per likelihood call.
+_bins_rebin = np.linspace(
+    wave_em.value[0] * (1 + 7.5),
+    wave_em.value[-1] * (1 + 7.5),
+    N_BINS + 1,
+)
+_wave_em_dig_rebin = np.digitize(_full_bins, _bins_rebin)
+_rebin_matrix = (
+    _wave_em_dig_rebin[:, np.newaxis] == np.arange(1, N_BINS + 1)[np.newaxis, :]
+).astype(float)  # (_max_bins_full, N_BINS)
+
+# Stacked cont_filled arrays — avoids per-galaxy attribute lookups inside the likelihood
+_tau_prec_all    = np.array([cont_filled.tau_prec_full[i] for i in range(N_DATA)])                             # (N_DATA, N_INSIDE_TAU, 100)
+_z_up_all        = np.array([cont_filled.first_bubble_encounter_coord_z_up_full[i] for i in range(N_DATA)])    # (N_DATA, N_INSIDE_TAU)
+_red_up_all      = np.array([cont_filled.first_bubble_encounter_redshift_up_full[i] for i in range(N_DATA)])   # (N_DATA, N_INSIDE_TAU)
+_z_lo_all        = np.array([cont_filled.first_bubble_encounter_coord_z_lo_full[i] for i in range(N_DATA)])    # (N_DATA, N_INSIDE_TAU)
+_red_lo_all      = np.array([cont_filled.first_bubble_encounter_redshift_lo_full[i] for i in range(N_DATA)])   # (N_DATA, N_INSIDE_TAU)
+_la_flux_out_all = np.array([cont_filled.la_flux_out_full[i] for i in range(N_DATA)])                         # (N_DATA, N_INSIDE_TAU)
+_com_fact_all    = np.array([cont_filled.com_fact[i] for i in range(N_DATA)])                                  # (N_DATA,)
+
 
 def get_spectral_likelihood(xb, yb, zb, rb):
     """
     Log-likelihood of observed spectra given bubble at (xb, yb, zb, rb).
-    Returns a scalar: sum of log-likelihoods over all galaxies and spectral bins.
+    All galaxy-axis operations are batched — no Python loop over galaxies.
     """
-    log_like = 0.0
+    # ── 1. Bubble geometry for all galaxies at once ───────────────────────────
+    dx = x_gal_mock - xb                                       # (N_DATA,)
+    dy = y_gal_mock - yb
+    dz = z_gal_mock - zb
+    inside = dx**2 + dy**2 + dz**2 < rb**2
+    dist_arr = np.where(inside, dz + np.sqrt(np.where(inside, rb**2 - dx**2 - dy**2, 0.0)), 0.0)
+    z_end_bub_arr = redshifts_of_mocks - np.where(inside, dist_arr / _R_H_per_gal, 0.0)  # (N_DATA,)
 
-    for index_gal in range(N_DATA):
-        xg = x_gal_mock[index_gal]
-        yg = y_gal_mock[index_gal]
-        zg = z_gal_mock[index_gal]
-        red_s = redshifts_of_mocks[index_gal]
+    # ── 2. IGM optical depth — calculate_taus_post called once per galaxy ─────
+    tau_now = _tau_prec_all.copy()                             # (N_DATA, N_INSIDE_TAU, 100)
+    for g in range(N_DATA):
+        tau_now[g] += calculate_taus_post(
+            redshifts_of_mocks[g], z_end_bub_arr[g],
+            _z_up_all[g].copy(), _red_up_all[g],
+            _z_lo_all[g].copy(), _red_lo_all[g],
+            n_iter=N_INSIDE_TAU,
+        )
 
-        # Far edge of the main bubble along this galaxy's LOS
-        # z_at_proper_distance inlined: z_end = z_s - R_com/R_H = z_s - dist/R_H
-        if (xg - xb)**2 + (yg - yb)**2 + (zg - zb)**2 < rb**2:
-            dist = zg - zb + np.sqrt(rb**2 - (xg - xb)**2 - (yg - yb)**2)
-            z_end_bub = red_s - dist / _R_H_per_gal[index_gal]
-        else:
-            z_end_bub = red_s
-
-        tau_cgm_in = _tau_cgm_per_gal[index_gal]       # (100,)
-        j_s_all = _j_s_per_gal[index_gal]              # (N_SAMPLES, 100)
-        area_factor_all = _area_factor_per_gal[index_gal]  # (N_SAMPLES,)
-
-        flux_to_save = np.zeros((N_ITER_BUB * N_INSIDE_TAU, _max_bins_full))
-
-        for n in range(N_ITER_BUB):
-            sl = slice(n * N_INSIDE_TAU, (n + 1) * N_INSIDE_TAU)
-
-            tau_now_i = np.copy(cont_filled.tau_prec_full[index_gal][sl, :])
-            tau_now_i += calculate_taus_post(
-                red_s,
-                z_end_bub,
-                np.copy(cont_filled.first_bubble_encounter_coord_z_up_full[index_gal][sl]),
-                np.copy(cont_filled.first_bubble_encounter_redshift_up_full[index_gal][sl]),
-                np.copy(cont_filled.first_bubble_encounter_coord_z_lo_full[index_gal][sl]),
-                np.copy(cont_filled.first_bubble_encounter_redshift_lo_full[index_gal][sl]),
-                n_iter=N_INSIDE_TAU,
+    # ── 3. Tau sanity: replace non-monotonic rows ─────────────────────────────
+    bad = np.any(tau_now[:, :, 30:] - tau_now[:, :, 29:-1] > 0.0, axis=2)  # (N_DATA, N_INSIDE_TAU)
+    if np.any(bad):
+        for g in np.where(np.any(bad, axis=1))[0]:
+            dist_cm = comoving_distance_from_source_Mpc(redshifts_of_mocks[g], z_end_bub_arr[g])
+            fallback = np.clip(
+                tau_wv(wave_em, dist=np.abs(dist_cm), zs=redshifts_of_mocks[g], z_end=5.3, nf=0.65)
+                + np.random.normal(0.0, 0.1),
+                0, np.inf,
             )
+            tau_now[g, bad[g]] = fallback
+    tau_now[tau_now < 0] = np.inf
+    tau_now = np.nan_to_num(tau_now, nan=np.inf)
 
-            bad = np.any(tau_now_i[:, 30:] - tau_now_i[:, 29:-1] > 0.0, axis=1)
-            if np.any(bad):
-                dist_cm = comoving_distance_from_source_Mpc(red_s, z_end_bub)
-                fallback = np.clip(
-                    tau_wv(wave_em, dist=np.abs(dist_cm), zs=red_s, z_end=5.3, nf=0.65)
-                    + np.random.normal(0.0, 0.1),
-                    0, np.inf,
-                )
-                tau_now_i[bad] = fallback
-            tau_now_i[tau_now_i < 0] = np.inf
-            tau_now_i = np.nan_to_num(tau_now_i, nan=np.inf)
+    # ── 4. Continuum for all galaxies — pure broadcasting ─────────────────────
+    eit_l = np.exp(-tau_now)                                   # (N_DATA, N_INSIDE_TAU, 100)
+    lae_now = _la_flux_out_all / _area_factor_per_gal          # (N_DATA, N_INSIDE_TAU)
+    continuum_all = (
+        lae_now[:, :, np.newaxis]                              # (N_DATA, N_INSIDE_TAU, 1)
+        * _j_s_per_gal                                         # (N_DATA, N_INSIDE_TAU, 100)
+        * eit_l                                                # (N_DATA, N_INSIDE_TAU, 100)
+        * _tau_cgm_per_gal[:, np.newaxis, :]                   # (N_DATA, 1, 100)
+        * _com_fact_all[:, np.newaxis, np.newaxis]             # (N_DATA, 1, 1)
+    )                                                          # (N_DATA, N_INSIDE_TAU, 100)
 
-            eit_l = np.exp(-tau_now_i)
-            lae_now = cont_filled.la_flux_out_full[index_gal][sl] / area_factor_all[sl]
+    # ── 5. Full-res flux + noise + rebin — two matmuls total ─────────────────
+    flat = continuum_all.reshape(N_DATA * N_INSIDE_TAU, 100)
+    flux_all = (flat @ _trapz_weights).reshape(N_DATA, N_INSIDE_TAU, _max_bins_full)
+    noisy = flux_all + np.random.normal(0, NOISE, flux_all.shape)
+    predicted = (
+        noisy.reshape(N_DATA * N_INSIDE_TAU, _max_bins_full) @ _rebin_matrix
+    ).reshape(N_DATA, N_INSIDE_TAU, N_BINS)                   # (N_DATA, N_INSIDE_TAU, N_BINS)
 
-            continuum_i = (
-                lae_now[:, np.newaxis]
-                * j_s_all[sl]
-                * eit_l
-                * tau_cgm_in[np.newaxis, :]
-                * cont_filled.com_fact[index_gal]
-            )
-            flux_to_save[sl] = full_res_flux(continuum_i, 7.5)
-
-        noisy = flux_to_save + np.random.normal(0, NOISE, flux_to_save.shape)
-        predicted = perturb_flux(noisy, N_BINS)   # (N_INSIDE_TAU, N_BINS)
-
-        model_mags = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted))  # (N_INSIDE_TAU, N_BINS)
-        obs_mags = _obs_mag_per_gal[index_gal]                             # (N_BINS,)
-
-        valid = np.isfinite(obs_mags) & np.all(np.isfinite(model_mags), axis=0)
-        if np.any(valid):
-            diffs = obs_mags[valid] - model_mags[:, valid]  # (N_INSIDE_TAU, n_valid)
-            log_kde = (
-                logsumexp(-0.5 * (diffs / BW_KDE) ** 2, axis=0)
-                - np.log(N_INSIDE_TAU)
-                - np.log(BW_KDE)
-                - 0.5 * np.log(2 * np.pi)
-            )                                                # (n_valid,)
-            log_like += np.sum(log_kde)
-
-    return log_like
+    # ── 6. KDE over all galaxies and bins in one shot ─────────────────────────
+    model_mags = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted))  # (N_DATA, N_INSIDE_TAU, N_BINS)
+    valid = (
+        np.isfinite(_obs_mag_per_gal)                          # (N_DATA, N_BINS)
+        & np.all(np.isfinite(model_mags), axis=1)
+    )
+    diffs = _obs_mag_per_gal[:, np.newaxis, :] - model_mags   # (N_DATA, N_INSIDE_TAU, N_BINS)
+    log_kde = (
+        logsumexp(-0.5 * (diffs / BW_KDE) ** 2, axis=1)       # (N_DATA, N_BINS)
+        - np.log(N_INSIDE_TAU)
+        - np.log(BW_KDE)
+        - 0.5 * np.log(2 * np.pi)
+    )
+    return float(np.sum(log_kde[valid]))
 
 
 def log_likelihood(theta):
