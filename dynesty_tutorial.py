@@ -267,6 +267,14 @@ _red_lo_all      = np.array([cont_filled.first_bubble_encounter_redshift_lo_full
 _la_flux_out_all = np.array([cont_filled.la_flux_out_full[i] for i in range(N_DATA)])                         # (N_DATA, N_INSIDE_TAU)
 _com_fact_all    = np.array([cont_filled.com_fact[i] for i in range(N_DATA)])                                  # (N_DATA,)
 
+# one_over_onepz per galaxy — matches what calculate_taus_post_batched computes from z_sources
+_ooz_per_gal = 1215.67 / (wave_em.value[np.newaxis, :] * (1 + redshifts_of_mocks[:, np.newaxis]))            # (N_DATA, 100)
+# I((1+red_up)*ooz) is fixed (both red_up and ooz depend only on precomputed sightlines + galaxy redshifts).
+# Precomputing it eliminates the O(N_INSIDE_TAU × 100) I() call inside every likelihood evaluation.
+_I_red_up_all = I(
+    (1 + _red_up_all[:, :, np.newaxis]) * _ooz_per_gal[:, np.newaxis, :]
+)  # (N_DATA, N_INSIDE_TAU, 100)
+
 
 import time as _time
 _NCALLS = 0
@@ -303,6 +311,7 @@ def get_spectral_likelihood(xb, yb, zb, rb):
         z_per_gal=_z_wv_per_gal,
         tau_wv_pref_per_gal=_tau_wv_pref_per_gal,
         I_z_end_per_gal=_I_z_end_per_gal,
+        I_red_up_all=_I_red_up_all,
     )
     _tick("2-calculate_taus_post")
 

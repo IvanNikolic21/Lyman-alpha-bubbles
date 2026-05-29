@@ -541,6 +541,7 @@ def calculate_taus_post_batched(
         z_per_gal=None,
         tau_wv_pref_per_gal=None,
         I_z_end_per_gal=None,
+        I_red_up_all=None,
 ):
     """
     Batched version of calculate_taus_post: handles all galaxies in one call.
@@ -581,12 +582,16 @@ def calculate_taus_post_batched(
     if np.any(mask_normal):
         zb_ar  = (1 + z_end_bubbles[:, np.newaxis]) * one_over_onepz  # (N_gal, 100)
         zb_exp = zb_ar[:, np.newaxis, :]                               # (N_gal, 1, 100)
-        ooz_exp   = one_over_onepz[:, np.newaxis, :]                   # (N_gal, 1, 100)
-        red_up_exp = 1 + red_up[:, :, np.newaxis]                      # (N_gal, n_iter, 1)
+        if I_red_up_all is not None:
+            i_red_up = I_red_up_all                                    # (N_gal, n_iter, 100), precomputed
+        else:
+            ooz_exp    = one_over_onepz[:, np.newaxis, :]              # (N_gal, 1, 100)
+            red_up_exp = 1 + red_up[:, :, np.newaxis]                  # (N_gal, n_iter, 1)
+            i_red_up   = I(red_up_exp * ooz_exp)                       # (N_gal, n_iter, 100)
         tau_normal = (
             tau_pref[:, np.newaxis, np.newaxis]
             * zb_exp ** 1.5
-            * (I(zb_exp) - I(red_up_exp * ooz_exp))
+            * (I(zb_exp) - i_red_up)
         )                                                               # (N_gal, n_iter, 100)
         taus[mask_normal] = tau_normal[mask_normal]
 
