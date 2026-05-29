@@ -529,3 +529,54 @@ def calculate_taus_post(
         )
 
     return taus
+
+
+def calculate_taus_post_batched(
+        z_sources,
+        z_end_bubbles,
+        first_bubble_encounter_coord_z_up,
+        first_bubble_encounter_redshift_up,
+        first_bubble_encounter_coord_z_lo,
+        first_bubble_encounter_redshift_lo,
+):
+    """
+    Batched version of calculate_taus_post: handles all galaxies in one call.
+
+    z_sources, z_end_bubbles         : (N_gal,)
+    z_up, red_up, z_lo, red_lo       : (N_gal, n_iter)
+    Returns                          : (N_gal, n_iter, 100)
+    """
+    N_gal, n_iter = first_bubble_encounter_coord_z_up.shape
+
+    z_val          = wave_em.value / 1215.67 * (1 + z_sources[:, np.newaxis]) - 1  # (N_gal, 100)
+    one_over_onepz = 1 / (1 + z_val)                                                # (N_gal, 100)
+    tau_gp         = 7.16e5 * ((1 + z_sources) / 10) ** 1.5                        # (N_gal,)
+    tau_pref       = tau_gp * r_alpha / np.pi                                       # (N_gal,)
+
+    taus  = np.zeros((N_gal, n_iter, len(wave_em)))
+    z_up  = first_bubble_encounter_coord_z_up     # (N_gal, n_iter)
+    z_lo  = first_bubble_encounter_coord_z_lo     # (N_gal, n_iter)
+    red_up = first_bubble_encounter_redshift_up   # (N_gal, n_iter)
+
+    # Inf sightlines: fall back to tau_wv (rare; loop only over affected galaxies)
+    mask_inf = (z_up == np.inf)
+    for g in np.where(np.any(mask_inf, axis=1))[0]:
+        dist = comoving_distance_from_source_Mpc(z_sources[g], z_end_bubbles[g])
+        tau_fallback = tau_wv(wave_em, dist=np.abs(dist), zs=z_sources[g], z_end=5.3, nf=0.65)
+        taus[g, mask_inf[g]] = tau_fallback
+
+    # Normal sightlines: fully vectorized across galaxies and sightlines
+    mask_normal = (~mask_inf) & ~((z_up < 0) & (z_lo > 0))
+    if np.any(mask_normal):
+        zb_ar  = (1 + z_end_bubbles[:, np.newaxis]) * one_over_onepz  # (N_gal, 100)
+        zb_exp = zb_ar[:, np.newaxis, :]                               # (N_gal, 1, 100)
+        ooz_exp   = one_over_onepz[:, np.newaxis, :]                   # (N_gal, 1, 100)
+        red_up_exp = 1 + red_up[:, :, np.newaxis]                      # (N_gal, n_iter, 1)
+        tau_normal = (
+            tau_pref[:, np.newaxis, np.newaxis]
+            * zb_exp ** 1.5
+            * (I(zb_exp) - I(red_up_exp * ooz_exp))
+        )                                                               # (N_gal, n_iter, 100)
+        taus[mask_normal] = tau_normal[mask_normal]
+
+    return taus
