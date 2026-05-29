@@ -19,7 +19,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import dynesty
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-from venv.speed_up import get_content, calculate_taus_post
+from venv.speed_up import get_content, calculate_taus_post_batched
 from dynesty import plotting as dyplot
 from dynesty.utils import resample_equal
 from astropy.cosmology import Planck18 as Cosmo
@@ -181,7 +181,7 @@ ADDITIVE = 1e-18    # additive offset before log-transform to avoid log(0)
 N_ITER_BUB = 1     # must match get_content call above
 N_INSIDE_TAU = 50  # must match get_content call above
 BW_KDE = 0.12      # Gaussian KDE bandwidth in magnitude space
-N_WORKERS = 4       # parallel likelihood evaluations via multiprocessing
+N_WORKERS = 8       # parallel likelihood evaluations via multiprocessing
 
 # ── Quantities that don't depend on bubble params — precompute once ───────────
 
@@ -275,15 +275,13 @@ def get_spectral_likelihood(xb, yb, zb, rb):
     dist_arr = np.where(inside, dz + np.sqrt(np.where(inside, rb**2 - dx**2 - dy**2, 0.0)), 0.0)
     z_end_bub_arr = redshifts_of_mocks - np.where(inside, dist_arr / _R_H_per_gal, 0.0)  # (N_DATA,)
 
-    # ── 2. IGM optical depth — calculate_taus_post called once per galaxy ─────
+    # ── 2. IGM optical depth — all galaxies in one batched call ──────────────
     tau_now = _tau_prec_all.copy()                             # (N_DATA, N_INSIDE_TAU, 100)
-    for g in range(N_DATA):
-        tau_now[g] += calculate_taus_post(
-            redshifts_of_mocks[g], z_end_bub_arr[g],
-            _z_up_all[g].copy(), _red_up_all[g],
-            _z_lo_all[g].copy(), _red_lo_all[g],
-            n_iter=N_INSIDE_TAU,
-        )
+    tau_now += calculate_taus_post_batched(
+        redshifts_of_mocks, z_end_bub_arr,
+        _z_up_all.copy(), _red_up_all,
+        _z_lo_all.copy(), _red_lo_all,
+    )
 
     # ── 3. Tau sanity: replace non-monotonic rows ─────────────────────────────
     bad = np.any(tau_now[:, :, 30:] - tau_now[:, :, 29:-1] > 0.0, axis=2)  # (N_DATA, N_INSIDE_TAU)
