@@ -538,12 +538,18 @@ def calculate_taus_post_batched(
         first_bubble_encounter_redshift_up,
         first_bubble_encounter_coord_z_lo,
         first_bubble_encounter_redshift_lo,
+        z_per_gal=None,
+        tau_wv_pref_per_gal=None,
+        I_z_end_per_gal=None,
 ):
     """
     Batched version of calculate_taus_post: handles all galaxies in one call.
 
     z_sources, z_end_bubbles         : (N_gal,)
     z_up, red_up, z_lo, red_lo       : (N_gal, n_iter)
+    z_per_gal, tau_wv_pref_per_gal,
+    I_z_end_per_gal                  : precomputed arrays — when provided, the inf
+                                       fallback avoids all Cosmo.H calls
     Returns                          : (N_gal, n_iter, 100)
     """
     N_gal, n_iter = first_bubble_encounter_coord_z_up.shape
@@ -558,11 +564,16 @@ def calculate_taus_post_batched(
     z_lo  = first_bubble_encounter_coord_z_lo     # (N_gal, n_iter)
     red_up = first_bubble_encounter_redshift_up   # (N_gal, n_iter)
 
-    # Inf sightlines: fall back to tau_wv (rare; loop only over affected galaxies)
+    # Inf sightlines: use fast precomputed path when available, else fall back to tau_wv
     mask_inf = (z_up == np.inf)
+    _fast = z_per_gal is not None
     for g in np.where(np.any(mask_inf, axis=1))[0]:
-        dist = comoving_distance_from_source_Mpc(z_sources[g], z_end_bubbles[g])
-        tau_fallback = tau_wv(wave_em, dist=np.abs(dist), zs=z_sources[g], z_end=5.3, nf=0.65)
+        if _fast:
+            ratio_g = (1 + z_end_bubbles[g]) / (1 + z_per_gal[g])     # (100,), no Cosmo.H
+            tau_fallback = tau_wv_pref_per_gal[g] * ratio_g**1.5 * (I(ratio_g) - I_z_end_per_gal[g])
+        else:
+            dist = comoving_distance_from_source_Mpc(z_sources[g], z_end_bubbles[g])
+            tau_fallback = tau_wv(wave_em, dist=np.abs(dist), zs=z_sources[g], z_end=5.3, nf=0.65)
         taus[g, mask_inf[g]] = tau_fallback
 
     # Normal sightlines: fully vectorized across galaxies and sightlines

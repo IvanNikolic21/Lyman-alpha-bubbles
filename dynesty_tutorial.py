@@ -26,8 +26,7 @@ from astropy.cosmology import Planck18 as Cosmo
 from astropy import constants as const
 import astropy.units as u
 from venv.galaxy_prop import get_muv, get_mock_data, get_js, tau_CGM, p_EW
-from venv.helpers import full_res_flux, perturb_flux, comoving_distance_from_source_Mpc, z_at_proper_distance
-from venv.igm_prop import tau_wv
+from venv.helpers import full_res_flux, perturb_flux, z_at_proper_distance, I
 from scipy.special import logsumexp
 # ── Ground truth and fake data ────────────────────────────────────────────────
 
@@ -160,7 +159,7 @@ cont_filled = get_content(
     y_gal_mock,
     z_gal_mock,
     n_iter_bub=1,
-    n_inside_tau=50,
+    n_inside_tau=10,
     include_muv_unc=False,
     fwhm_true=False,
     redshift=7.5,
@@ -179,7 +178,7 @@ N_BINS = 11         # fixed spectral bins matching flux_noise_mock
 NOISE = 5e-20       # per-pixel noise added to model spectra
 ADDITIVE = 1e-18    # additive offset before log-transform to avoid log(0)
 N_ITER_BUB = 1     # must match get_content call above
-N_INSIDE_TAU = 50  # must match get_content call above
+N_INSIDE_TAU = 10  # must match get_content call above
 BW_KDE = 0.12      # Gaussian KDE bandwidth in magnitude space
 N_WORKERS = 8       # parallel likelihood evaluations via multiprocessing
 
@@ -224,6 +223,13 @@ _area_factor_per_gal = np.where(_raw_af < 1e-20, 1e-5, _raw_af)
 # Observed spectra converted to magnitude space — avoids log10 in every call
 _obs_mag_per_gal = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * flux_noise_mock))  # (N_DATA, N_BINS)
 
+# Fixed parts of tau_wv — lets calculate_taus_post_batched skip all Cosmo.H calls
+_r_alpha_val = 6.25e8 / (4 * np.pi * (const.c / wave_Lya).to(u.Hz).value)
+_tau_gp_per_gal = 7.16e5 * ((1 + redshifts_of_mocks) / 10) ** 1.5                # (N_DATA,)
+_tau_wv_pref_per_gal = _tau_gp_per_gal * _r_alpha_val / np.pi * 0.65             # (N_DATA,), nf=0.65
+_z_wv_per_gal = wave_em.value[np.newaxis, :] / 1216 * (1 + redshifts_of_mocks[:, np.newaxis]) - 1  # (N_DATA, 100)
+_I_z_end_per_gal = I((1 + 5.3) / (1 + _z_wv_per_gal))                            # (N_DATA, 100)
+
 # Trapz-weight matrix: continuum (N, 100) @ _trapz_weights → (N, _max_bins_full)
 # Replaces the per-bin loop inside full_res_flux — one matmul per likelihood call.
 _wave_em_dig_full = np.digitize(wave_em.value * (1 + 7.5), _full_bins)
@@ -262,11 +268,23 @@ _la_flux_out_all = np.array([cont_filled.la_flux_out_full[i] for i in range(N_DA
 _com_fact_all    = np.array([cont_filled.com_fact[i] for i in range(N_DATA)])                                  # (N_DATA,)
 
 
+import time as _time
+_NCALLS = 0
+
 def get_spectral_likelihood(xb, yb, zb, rb):
     """
     Log-likelihood of observed spectra given bubble at (xb, yb, zb, rb).
     All galaxy-axis operations are batched — no Python loop over galaxies.
     """
+    global _NCALLS
+    _NCALLS += 1
+    _profile = (_NCALLS <= 3)
+    _t0 = _time.perf_counter() if _profile else None
+
+    def _tick(label):
+        if _profile:
+            print(f"  [{_NCALLS}] {label}: {(_time.perf_counter()-_t0)*1e3:.1f} ms", flush=True)
+
     # ── 1. Bubble geometry for all galaxies at once ───────────────────────────
     dx = x_gal_mock - xb                                       # (N_DATA,)
     dy = y_gal_mock - yb
@@ -274,6 +292,7 @@ def get_spectral_likelihood(xb, yb, zb, rb):
     inside = dx**2 + dy**2 + dz**2 < rb**2
     dist_arr = np.where(inside, dz + np.sqrt(np.where(inside, rb**2 - dx**2 - dy**2, 0.0)), 0.0)
     z_end_bub_arr = redshifts_of_mocks - np.where(inside, dist_arr / _R_H_per_gal, 0.0)  # (N_DATA,)
+    _tick("1-geometry")
 
     # ── 2. IGM optical depth — all galaxies in one batched call ──────────────
     tau_now = _tau_prec_all.copy()                             # (N_DATA, N_INSIDE_TAU, 100)
@@ -281,21 +300,26 @@ def get_spectral_likelihood(xb, yb, zb, rb):
         redshifts_of_mocks, z_end_bub_arr,
         _z_up_all.copy(), _red_up_all,
         _z_lo_all.copy(), _red_lo_all,
+        z_per_gal=_z_wv_per_gal,
+        tau_wv_pref_per_gal=_tau_wv_pref_per_gal,
+        I_z_end_per_gal=_I_z_end_per_gal,
     )
+    _tick("2-calculate_taus_post")
 
     # ── 3. Tau sanity: replace non-monotonic rows ─────────────────────────────
     bad = np.any(tau_now[:, :, 30:] - tau_now[:, :, 29:-1] > 0.0, axis=2)  # (N_DATA, N_INSIDE_TAU)
     if np.any(bad):
         for g in np.where(np.any(bad, axis=1))[0]:
-            dist_cm = comoving_distance_from_source_Mpc(redshifts_of_mocks[g], z_end_bub_arr[g])
+            ratio_g = (1 + z_end_bub_arr[g]) / (1 + _z_wv_per_gal[g])
             fallback = np.clip(
-                tau_wv(wave_em, dist=np.abs(dist_cm), zs=redshifts_of_mocks[g], z_end=5.3, nf=0.65)
+                _tau_wv_pref_per_gal[g] * ratio_g**1.5 * (I(ratio_g) - _I_z_end_per_gal[g])
                 + np.random.normal(0.0, 0.1),
                 0, np.inf,
             )
             tau_now[g, bad[g]] = fallback
     tau_now[tau_now < 0] = np.inf
     tau_now = np.nan_to_num(tau_now, nan=np.inf)
+    _tick("3-tau_sanity")
 
     # ── 4. Continuum for all galaxies — pure broadcasting ─────────────────────
     eit_l = np.exp(-tau_now)                                   # (N_DATA, N_INSIDE_TAU, 100)
@@ -307,6 +331,7 @@ def get_spectral_likelihood(xb, yb, zb, rb):
         * _tau_cgm_per_gal[:, np.newaxis, :]                   # (N_DATA, 1, 100)
         * _com_fact_all[:, np.newaxis, np.newaxis]             # (N_DATA, 1, 1)
     )                                                          # (N_DATA, N_INSIDE_TAU, 100)
+    _tick("4-continuum")
 
     # ── 5. Full-res flux + noise + rebin — two matmuls total ─────────────────
     flat = continuum_all.reshape(N_DATA * N_INSIDE_TAU, 100)
@@ -315,6 +340,7 @@ def get_spectral_likelihood(xb, yb, zb, rb):
     predicted = (
         noisy.reshape(N_DATA * N_INSIDE_TAU, _max_bins_full) @ _rebin_matrix
     ).reshape(N_DATA, N_INSIDE_TAU, N_BINS)                   # (N_DATA, N_INSIDE_TAU, N_BINS)
+    _tick("5-flux_rebin")
 
     # ── 6. KDE over all galaxies and bins in one shot ─────────────────────────
     model_mags = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted))  # (N_DATA, N_INSIDE_TAU, N_BINS)
@@ -329,6 +355,7 @@ def get_spectral_likelihood(xb, yb, zb, rb):
         - np.log(BW_KDE)
         - 0.5 * np.log(2 * np.pi)
     )
+    _tick("6-KDE")
     return float(np.sum(log_kde[valid]))
 
 
