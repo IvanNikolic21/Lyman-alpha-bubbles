@@ -394,8 +394,7 @@ def get_spectral_likelihood(xb, yb, zb, rb):
                     continue
                 ratio_g = (1 + z_end_bub_arr[g]) / (1 + _z_wv_per_gal[g])
                 tau_now_in[_ii, bad[_ii]] = np.clip(
-                    _tau_wv_pref_per_gal[g] * ratio_g**1.5 * (I(ratio_g) - _I_z_end_per_gal[g])
-                    + np.random.normal(0.0, 0.1),
+                    _tau_wv_pref_per_gal[g] * ratio_g**1.5 * (I(ratio_g) - _I_z_end_per_gal[g]),
                     0, np.inf,
                 )
         tau_now_in[tau_now_in < 0] = np.inf
