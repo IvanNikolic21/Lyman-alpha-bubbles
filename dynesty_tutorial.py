@@ -40,7 +40,7 @@ from scipy.special import logsumexp
 
 TRUE_MU = np.array([0,0,0,10])       # what we want to recover
 #SIGMA   = np.array([0.5,  0.8])       # known measurement noise (per axis)
-N_DATA  = 30   # 50 for production; 10 for a quick test run
+N_DATA  = 50   # 50 for production; 10 for a quick test run
 main_dir='/groups/astro/ivannik/programs/Lyman-alpha-bubbles/'
 wave_em = np.linspace(1214, 1225., 100) * u.Angstrom
 wave_Lya = 1215.67 * u.Angstrom
