@@ -270,6 +270,12 @@ _rebin_matrix = (
 _direct_matrix = _trapz_weights @ _rebin_matrix  # (100, N_BINS)
 # Each final bin sums M full-res pixels; summing M iid N(0,σ²) gives N(0,Mσ²)
 _noise_per_bin = np.sqrt(_rebin_matrix.sum(axis=0)) * NOISE  # (N_BINS,)
+_M_per_bin = _rebin_matrix.sum(axis=0).astype(int)
+_sigma_m_floor = (10 / np.log(10)) * _noise_per_bin / ADDITIVE  # noise in mag at faint limit
+print(f"Full-res pixels per bin:        {_M_per_bin}", flush=True)
+print(f"Noise per bin (flux):           {_noise_per_bin}", flush=True)
+print(f"Mag noise at faint limit:       {np.round(_sigma_m_floor, 4)}", flush=True)
+print(f"sigma_m / BW_KDE (faint limit): {np.round(_sigma_m_floor / BW_KDE, 3)}", flush=True)
 
 # Stacked cont_filled arrays — avoids per-galaxy attribute lookups inside the likelihood
 _tau_prec_all    = np.array([cont_filled.tau_prec_full[i] for i in range(N_DATA)])                             # (N_DATA, N_INSIDE_TAU, 100)
@@ -434,7 +440,42 @@ def get_spectral_likelihood(xb, yb, zb, rb):
 def log_likelihood(theta):
     return get_spectral_likelihood(theta[0], theta[1], theta[2], theta[3])
 
-print(f"True bubble params (x, y, z, r): {TRUE_MU}", flush=True)
+# ── Pre-run diagnostics ───────────────────────────────────────────────────────
+print(f"\nTrue bubble params (x, y, z, r): {TRUE_MU}", flush=True)
+
+# 1. Likelihood at truth — should be near the posterior peak
+_ll_truth = get_spectral_likelihood(*TRUE_MU)
+print(f"Log-likelihood at truth: {_ll_truth:.2f}", flush=True)
+
+# 2. 1-D slices through truth — peak should sit on the red dashed line;
+#    discontinuities flag tau-sanity fallback misfires.
+_param_names  = ['x_bub', 'y_bub', 'z_bub', 'r_bub']
+_param_ranges = [
+    np.linspace(PRIOR_LO[0], PRIOR_HI[0], 31),
+    np.linspace(PRIOR_LO[1], PRIOR_HI[1], 31),
+    np.linspace(PRIOR_LO[2], PRIOR_HI[2], 31),
+    np.linspace(PRIOR_LO[3], PRIOR_HI[3], 31),
+]
+_fig_sl, _axes_sl = plt.subplots(1, 4, figsize=(16, 4))
+for _pi, (ax, pname, pgrid) in enumerate(zip(_axes_sl, _param_names, _param_ranges)):
+    _lls = []
+    for _v in pgrid:
+        _p = TRUE_MU.copy().astype(float)
+        _p[_pi] = _v
+        _lls.append(get_spectral_likelihood(*_p))
+    ax.plot(pgrid, _lls, lw=1.5)
+    ax.axvline(TRUE_MU[_pi], color='red', ls='--', label='truth')
+    ax.set_xlabel(pname)
+    if _pi == 0:
+        ax.set_ylabel('log L')
+    ax.legend(fontsize=8)
+_fig_sl.suptitle("1-D likelihood slices through truth (red = true value)")
+_fig_sl.tight_layout()
+_fig_sl.savefig("likelihood_slices.png", dpi=150, bbox_inches="tight")
+print("Saved likelihood_slices.png", flush=True)
+
+# Reset call counter so profiling covers the first sampler calls, not diagnostics
+_NCALLS = 0
 print("Starting dynesty sampler...", flush=True)
 
 # ── Run dynesty ───────────────────────────────────────────────────────────────
