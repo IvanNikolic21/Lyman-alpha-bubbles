@@ -55,7 +55,7 @@ NOISE        = 5e-20
 ADDITIVE     = 1e-18
 BW_KDE       = 0.12
 N_WORKERS    = 24
-NLIVE_PP     = 100   # reduced from 300 for speed; increase if posteriors look jagged
+NLIVE_PP     = 200   # reduced from 300 for speed; increase if posteriors look jagged
 DLOGZ_PP     = 1.0   # looser than production 0.5
 MAIN_DIR     = '/groups/astro/ivannik/programs/Lyman-alpha-bubbles/'
 
