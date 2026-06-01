@@ -567,15 +567,22 @@ def calculate_taus_post_batched(
 
     # Inf sightlines: use fast precomputed path when available, else fall back to tau_wv
     mask_inf = (z_up == np.inf)
-    _fast = z_per_gal is not None
-    for g in np.where(np.any(mask_inf, axis=1))[0]:
-        if _fast:
-            ratio_g = (1 + z_end_bubbles[g]) / (1 + z_per_gal[g])     # (100,), no Cosmo.H
-            tau_fallback = tau_wv_pref_per_gal[g] * ratio_g**1.5 * (I(ratio_g) - I_z_end_per_gal[g])
+    inf_gals = np.where(np.any(mask_inf, axis=1))[0]
+    if len(inf_gals) > 0:
+        if z_per_gal is not None:
+            # Vectorized over all inf-galaxy indices at once — no per-galaxy I() call
+            ratio = (1 + z_end_bubbles[inf_gals, np.newaxis]) / (1 + z_per_gal[inf_gals])  # (n_inf, 100)
+            tau_fallback = (
+                tau_wv_pref_per_gal[inf_gals, np.newaxis]
+                * ratio ** 1.5
+                * (I(ratio) - I_z_end_per_gal[inf_gals])
+            )  # (n_inf, 100)
+            for i, g in enumerate(inf_gals):
+                taus[g, mask_inf[g]] = tau_fallback[i]
         else:
-            dist = comoving_distance_from_source_Mpc(z_sources[g], z_end_bubbles[g])
-            tau_fallback = tau_wv(wave_em, dist=np.abs(dist), zs=z_sources[g], z_end=5.3, nf=0.65)
-        taus[g, mask_inf[g]] = tau_fallback
+            for g in inf_gals:
+                dist = comoving_distance_from_source_Mpc(z_sources[g], z_end_bubbles[g])
+                taus[g, mask_inf[g]] = tau_wv(wave_em, dist=np.abs(dist), zs=z_sources[g], z_end=5.3, nf=0.65)
 
     # Normal sightlines: fully vectorized across galaxies and sightlines
     mask_normal = (~mask_inf) & ~((z_up < 0) & (z_lo > 0))

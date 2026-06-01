@@ -159,7 +159,7 @@ cont_filled = get_content(
     y_gal_mock,
     z_gal_mock,
     n_iter_bub=1,
-    n_inside_tau=10,
+    n_inside_tau=50,
     include_muv_unc=False,
     fwhm_true=False,
     redshift=7.5,
@@ -178,9 +178,9 @@ N_BINS = 11         # fixed spectral bins matching flux_noise_mock
 NOISE = 5e-20       # per-pixel noise added to model spectra
 ADDITIVE = 1e-18    # additive offset before log-transform to avoid log(0)
 N_ITER_BUB = 1     # must match get_content call above
-N_INSIDE_TAU = 10  # must match get_content call above
+N_INSIDE_TAU = 50  # must match get_content call above
 BW_KDE = 0.12      # Gaussian KDE bandwidth in magnitude space
-N_WORKERS = 8       # parallel likelihood evaluations via multiprocessing
+N_WORKERS = 24       # parallel likelihood evaluations via multiprocessing
 
 # ── Quantities that don't depend on bubble params — precompute once ───────────
 
@@ -258,6 +258,11 @@ _rebin_matrix = (
     _wave_em_dig_rebin[:, np.newaxis] == np.arange(1, N_BINS + 1)[np.newaxis, :]
 ).astype(float)  # (_max_bins_full, N_BINS)
 
+# Combined trapz→rebin in one (100, N_BINS) matrix — skips the intermediate full-res array entirely
+_direct_matrix = _trapz_weights @ _rebin_matrix  # (100, N_BINS)
+# Each final bin sums M full-res pixels; summing M iid N(0,σ²) gives N(0,Mσ²)
+_noise_per_bin = np.sqrt(_rebin_matrix.sum(axis=0)) * NOISE  # (N_BINS,)
+
 # Stacked cont_filled arrays — avoids per-galaxy attribute lookups inside the likelihood
 _tau_prec_all    = np.array([cont_filled.tau_prec_full[i] for i in range(N_DATA)])                             # (N_DATA, N_INSIDE_TAU, 100)
 _z_up_all        = np.array([cont_filled.first_bubble_encounter_coord_z_up_full[i] for i in range(N_DATA)])    # (N_DATA, N_INSIDE_TAU)
@@ -274,6 +279,44 @@ _ooz_per_gal = 1215.67 / (wave_em.value[np.newaxis, :] * (1 + redshifts_of_mocks
 _I_red_up_all = I(
     (1 + _red_up_all[:, :, np.newaxis]) * _ooz_per_gal[:, np.newaxis, :]
 )  # (N_DATA, N_INSIDE_TAU, 100)
+
+# Fixed part of continuum: everything except exp(-tau_post), the only bubble-dependent factor.
+# exp(-tau_prec) is included here so it never runs in the hot path.
+_base_continuum = (
+    (_la_flux_out_all / _area_factor_per_gal)[:, :, np.newaxis]  # (N_DATA, N_INSIDE_TAU, 1)
+    * _j_s_per_gal                                                 # (N_DATA, N_INSIDE_TAU, 100)
+    * np.exp(-_tau_prec_all)                                       # (N_DATA, N_INSIDE_TAU, 100)
+    * _tau_cgm_per_gal[:, np.newaxis, :]                          # (N_DATA, 1, 100)
+    * _com_fact_all[:, np.newaxis, np.newaxis]                     # (N_DATA, 1, 1)
+)  # (N_DATA, N_INSIDE_TAU, 100)
+
+# ── Outside-bubble precomputation ──────────────────────────────────────────
+# When galaxy g is outside the main bubble, z_end_bubble = z_source (fixed).
+# tau_post is then fully fixed per galaxy — precompute it so that at call time
+# steps 2-4 are skipped entirely for outside galaxies.
+_tau_post_outside = calculate_taus_post_batched(
+    redshifts_of_mocks, redshifts_of_mocks,   # z_end = z_source for outside galaxies
+    _z_up_all.copy(), _red_up_all,
+    _z_lo_all.copy(), _red_lo_all,
+    z_per_gal=_z_wv_per_gal,
+    tau_wv_pref_per_gal=_tau_wv_pref_per_gal,
+    I_z_end_per_gal=_I_z_end_per_gal,
+    I_red_up_all=_I_red_up_all,
+)  # (N_DATA, N_INSIDE_TAU, 100)
+# Apply sanity checks to the outside-case tau now, before baking into the fixed array
+_tau_out_check = _tau_post_outside.copy()
+_bad_out = np.any(_tau_out_check[:, :, 30:] - _tau_out_check[:, :, 29:-1] > 0, axis=2)
+for _g in np.where(np.any(_bad_out, axis=1))[0]:
+    _ratio_g = (1 + redshifts_of_mocks[_g]) / (1 + _z_wv_per_gal[_g])
+    _tau_out_check[_g, _bad_out[_g]] = np.clip(
+        _tau_wv_pref_per_gal[_g] * _ratio_g**1.5 * (I(_ratio_g) - _I_z_end_per_gal[_g]),
+        0, np.inf,
+    )
+_tau_out_check[_tau_out_check < 0] = np.inf
+_tau_out_check = np.nan_to_num(_tau_out_check, nan=np.inf)
+# _base_continuum already has exp(-tau_prec); multiply by exp(-tau_post_outside)
+_base_cont_eit_outside = _base_continuum * np.exp(-_tau_out_check)  # (N_DATA, N_INSIDE_TAU, 100)
+del _tau_post_outside, _tau_out_check, _bad_out
 
 
 import time as _time
@@ -293,62 +336,62 @@ def get_spectral_likelihood(xb, yb, zb, rb):
         if _profile:
             print(f"  [{_NCALLS}] {label}: {(_time.perf_counter()-_t0)*1e3:.1f} ms", flush=True)
 
-    # ── 1. Bubble geometry for all galaxies at once ───────────────────────────
+    # ── 1. Bubble geometry — identify which galaxies are inside ───────────────
     dx = x_gal_mock - xb                                       # (N_DATA,)
     dy = y_gal_mock - yb
     dz = z_gal_mock - zb
     inside = dx**2 + dy**2 + dz**2 < rb**2
     dist_arr = np.where(inside, dz + np.sqrt(np.where(inside, rb**2 - dx**2 - dy**2, 0.0)), 0.0)
     z_end_bub_arr = redshifts_of_mocks - np.where(inside, dist_arr / _R_H_per_gal, 0.0)  # (N_DATA,)
+    inside_gals = np.where(inside)[0]
     _tick("1-geometry")
 
-    # ── 2. IGM optical depth — all galaxies in one batched call ──────────────
-    tau_now = _tau_prec_all.copy()                             # (N_DATA, N_INSIDE_TAU, 100)
-    tau_now += calculate_taus_post_batched(
-        redshifts_of_mocks, z_end_bub_arr,
-        _z_up_all.copy(), _red_up_all,
-        _z_lo_all.copy(), _red_lo_all,
-        z_per_gal=_z_wv_per_gal,
-        tau_wv_pref_per_gal=_tau_wv_pref_per_gal,
-        I_z_end_per_gal=_I_z_end_per_gal,
-        I_red_up_all=_I_red_up_all,
-    )
-    _tick("2-calculate_taus_post")
+    # ── 2-4. IGM tau + continuum — only inside-bubble galaxies need fresh work ─
+    # Outside galaxies: tau_post is fixed (z_end=z_source) — use _base_cont_eit_outside directly.
+    # Inside galaxies:  compute tau_post for the n_inside slice only, overwrite those rows.
+    if len(inside_gals) == 0:
+        continuum_all = _base_cont_eit_outside                 # no allocation — direct reference
+        _tick("2-calculate_taus_post")
+        _tick("3-tau_sanity")
+        _tick("4-continuum")
+    else:
+        tau_post_in = calculate_taus_post_batched(             # (n_inside, N_INSIDE_TAU, 100)
+            redshifts_of_mocks[inside_gals], z_end_bub_arr[inside_gals],
+            _z_up_all[inside_gals].copy(), _red_up_all[inside_gals],
+            _z_lo_all[inside_gals].copy(), _red_lo_all[inside_gals],
+            z_per_gal=_z_wv_per_gal[inside_gals],
+            tau_wv_pref_per_gal=_tau_wv_pref_per_gal[inside_gals],
+            I_z_end_per_gal=_I_z_end_per_gal[inside_gals],
+            I_red_up_all=_I_red_up_all[inside_gals],
+        )
+        _tick("2-calculate_taus_post")
 
-    # ── 3. Tau sanity: replace non-monotonic rows ─────────────────────────────
-    bad = np.any(tau_now[:, :, 30:] - tau_now[:, :, 29:-1] > 0.0, axis=2)  # (N_DATA, N_INSIDE_TAU)
-    if np.any(bad):
-        for g in np.where(np.any(bad, axis=1))[0]:
-            ratio_g = (1 + z_end_bub_arr[g]) / (1 + _z_wv_per_gal[g])
-            fallback = np.clip(
-                _tau_wv_pref_per_gal[g] * ratio_g**1.5 * (I(ratio_g) - _I_z_end_per_gal[g])
-                + np.random.normal(0.0, 0.1),
-                0, np.inf,
-            )
-            tau_now[g, bad[g]] = fallback
-    tau_now[tau_now < 0] = np.inf
-    tau_now = np.nan_to_num(tau_now, nan=np.inf)
-    _tick("3-tau_sanity")
+        tau_now_in = _tau_prec_all[inside_gals] + tau_post_in # (n_inside, N_INSIDE_TAU, 100)
+        bad = np.any(tau_now_in[:, :, 30:] - tau_now_in[:, :, 29:-1] > 0.0, axis=2)
+        if np.any(bad):
+            for _ii, g in enumerate(inside_gals):
+                if not np.any(bad[_ii]):
+                    continue
+                ratio_g = (1 + z_end_bub_arr[g]) / (1 + _z_wv_per_gal[g])
+                tau_now_in[_ii, bad[_ii]] = np.clip(
+                    _tau_wv_pref_per_gal[g] * ratio_g**1.5 * (I(ratio_g) - _I_z_end_per_gal[g])
+                    + np.random.normal(0.0, 0.1),
+                    0, np.inf,
+                )
+        tau_now_in[tau_now_in < 0] = np.inf
+        tau_now_in = np.nan_to_num(tau_now_in, nan=np.inf)
+        _tick("3-tau_sanity")
 
-    # ── 4. Continuum for all galaxies — pure broadcasting ─────────────────────
-    eit_l = np.exp(-tau_now)                                   # (N_DATA, N_INSIDE_TAU, 100)
-    lae_now = _la_flux_out_all / _area_factor_per_gal          # (N_DATA, N_INSIDE_TAU)
-    continuum_all = (
-        lae_now[:, :, np.newaxis]                              # (N_DATA, N_INSIDE_TAU, 1)
-        * _j_s_per_gal                                         # (N_DATA, N_INSIDE_TAU, 100)
-        * eit_l                                                # (N_DATA, N_INSIDE_TAU, 100)
-        * _tau_cgm_per_gal[:, np.newaxis, :]                   # (N_DATA, 1, 100)
-        * _com_fact_all[:, np.newaxis, np.newaxis]             # (N_DATA, 1, 1)
-    )                                                          # (N_DATA, N_INSIDE_TAU, 100)
-    _tick("4-continuum")
+        continuum_all = _base_cont_eit_outside.copy()
+        continuum_all[inside_gals] = _base_continuum[inside_gals] * np.exp(-tau_now_in)
+        _tick("4-continuum")
 
-    # ── 5. Full-res flux + noise + rebin — two matmuls total ─────────────────
+    # ── 5. Flux + noise + rebin — single matmul, noise in final-bin space ────
+    # _direct_matrix = _trapz_weights @ _rebin_matrix skips the intermediate full-res array.
+    # Noise is equivalent: summing M iid N(0,σ²) full-res pixels → N(0,Mσ²) per final bin.
     flat = continuum_all.reshape(N_DATA * N_INSIDE_TAU, 100)
-    flux_all = (flat @ _trapz_weights).reshape(N_DATA, N_INSIDE_TAU, _max_bins_full)
-    noisy = flux_all + np.random.normal(0, NOISE, flux_all.shape)
-    predicted = (
-        noisy.reshape(N_DATA * N_INSIDE_TAU, _max_bins_full) @ _rebin_matrix
-    ).reshape(N_DATA, N_INSIDE_TAU, N_BINS)                   # (N_DATA, N_INSIDE_TAU, N_BINS)
+    predicted = (flat @ _direct_matrix).reshape(N_DATA, N_INSIDE_TAU, N_BINS)
+    predicted += np.random.normal(0, 1, predicted.shape) * _noise_per_bin
     _tick("5-flux_rebin")
 
     # ── 6. KDE over all galaxies and bins in one shot ─────────────────────────
@@ -394,7 +437,7 @@ with mp.get_context('fork').Pool(N_WORKERS) as pool:
             log_likelihood,
             prior_transform,
             ndim=NDIM,
-            nlive=100,   # 300 for production; 100 for quick test
+            nlive=300,   # 300 for production; 100 for quick test
             pool=pool,
             queue_size=N_WORKERS,
         )
