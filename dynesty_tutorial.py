@@ -326,6 +326,12 @@ _tau_out_check = np.nan_to_num(_tau_out_check, nan=np.inf)
 _base_cont_eit_outside = _base_continuum * np.exp(-_tau_out_check)  # (N_DATA, N_INSIDE_TAU, 100)
 del _tau_post_outside, _tau_out_check, _bad_out
 
+# Precompute the rebinned flux for outside-bubble galaxies — the matmul result is fixed.
+# At call time only inside-galaxy rows need recomputing, shrinking the matmul by ~N_DATA/n_inside.
+_flux_outside = (
+    _base_cont_eit_outside.reshape(N_DATA * N_INSIDE_TAU, 100) @ _direct_matrix
+).reshape(N_DATA, N_INSIDE_TAU, N_BINS)  # (N_DATA, N_INSIDE_TAU, N_BINS)
+
 
 import time as _time
 _NCALLS = 0
@@ -394,11 +400,15 @@ def get_spectral_likelihood(xb, yb, zb, rb):
         continuum_all[inside_gals] = _base_continuum[inside_gals] * np.exp(-tau_now_in)
         _tick("4-continuum")
 
-    # ── 5. Flux + noise + rebin — single matmul, noise in final-bin space ────
-    # _direct_matrix = _trapz_weights @ _rebin_matrix skips the intermediate full-res array.
-    # Noise is equivalent: summing M iid N(0,σ²) full-res pixels → N(0,Mσ²) per final bin.
-    flat = continuum_all.reshape(N_DATA * N_INSIDE_TAU, 100)
-    predicted = (flat @ _direct_matrix).reshape(N_DATA, N_INSIDE_TAU, N_BINS)
+    # ── 5. Flux + rebin — matmul only for inside-galaxy rows ─────────────────
+    # Outside galaxies: use precomputed _flux_outside (fixed matmul result).
+    # Inside galaxies:  recompute only those rows — matmul scales with n_inside, not N_DATA.
+    predicted = _flux_outside.copy()
+    if len(inside_gals) > 0:
+        flat_in = continuum_all[inside_gals].reshape(len(inside_gals) * N_INSIDE_TAU, 100)
+        predicted[inside_gals] = (flat_in @ _direct_matrix).reshape(
+            len(inside_gals), N_INSIDE_TAU, N_BINS
+        )
     predicted += np.random.normal(0, 1, predicted.shape) * _noise_per_bin
     _tick("5-flux_rebin")
 
