@@ -317,6 +317,13 @@ def run_single_inference(seed: int, n_workers: int = N_WORKERS) -> np.ndarray:
         for i in range(NDIM)
     ])
     print(f"[seed {seed}] Quantiles: {np.round(quantiles, 3)}", flush=True)
+
+    for _pi, _pname in enumerate(PARAM_NAMES):
+        _ps = equal_samples[:, _pi]
+        print(f"  {_pname:6s}  mean={_ps.mean():.3f}  median={np.median(_ps):.3f}  "
+              f"std={_ps.std():.3f}  truth={TRUE_MU[_pi]:.1f}  "
+              f"[{np.percentile(_ps,16):.2f}, {np.percentile(_ps,84):.2f}]", flush=True)
+
     return quantiles
 
 
