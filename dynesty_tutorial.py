@@ -409,7 +409,6 @@ def get_spectral_likelihood(xb, yb, zb, rb):
         predicted[inside_gals] = (flat_in @ _direct_matrix).reshape(
             len(inside_gals), N_INSIDE_TAU, N_BINS
         )
-    predicted += np.random.normal(0, 1, predicted.shape) * _noise_per_bin
     _tick("5-flux_rebin")
 
     # ── 6. KDE over all galaxies and bins in one shot ─────────────────────────
@@ -419,10 +418,13 @@ def get_spectral_likelihood(xb, yb, zb, rb):
         & np.all(np.isfinite(model_mags), axis=1)
     )
     diffs = _obs_mag_per_gal[:, np.newaxis, :] - model_mags   # (N_DATA, N_INSIDE_TAU, N_BINS)
+    # Noise in magnitude space per sample; fold into per-sample KDE bandwidth so
+    # the likelihood is deterministic (no random draw inside the hot path).
+    _sigma_m = (10 / np.log(10)) * _noise_per_bin / (ADDITIVE + 2 * predicted)
+    _bw_eff = np.sqrt(BW_KDE**2 + _sigma_m**2)
     log_kde = (
-        logsumexp(-0.5 * (diffs / BW_KDE) ** 2, axis=1)       # (N_DATA, N_BINS)
+        logsumexp(-0.5 * (diffs / _bw_eff) ** 2 - np.log(_bw_eff), axis=1)
         - np.log(N_INSIDE_TAU)
-        - np.log(BW_KDE)
         - 0.5 * np.log(2 * np.pi)
     )
     _tick("6-KDE")
