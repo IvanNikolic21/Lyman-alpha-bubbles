@@ -13,6 +13,14 @@ verify that dynesty got it right.
 """
 
 import os
+# Limit BLAS/OpenMP to 1 thread per process — must be set before numpy is imported.
+# With fork-based multiprocessing we get N_WORKERS processes, each single-threaded,
+# which is far better than N_WORKERS × N_blas_threads threads all fighting for the same cores.
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import warnings
 import multiprocessing as mp
 import numpy as np
