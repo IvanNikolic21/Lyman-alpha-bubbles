@@ -63,6 +63,76 @@ wave_em  = np.linspace(1214, 1225., 100) * u.Angstrom
 wave_Lya = 1215.67 * u.Angstrom
 PARAM_NAMES = ['x_bub', 'y_bub', 'z_bub', 'r_bub']
 
+# ── Module-level state for the likelihood ─────────────────────────────────────
+# Populated by run_single_inference() before the fork pool is created.
+# Fork workers inherit the fully-populated namespace; the functions below are
+# module-level (picklable), so dynesty can send them through the pool queue.
+import types as _types
+_S = _types.SimpleNamespace()
+
+
+def _prior_transform(u):
+    return PRIOR_LO + u * (PRIOR_HI - PRIOR_LO)
+
+
+def _log_likelihood(theta):
+    s  = _S
+    xb, yb, zb, rb = theta
+    dx    = s.x_gal_mock - xb
+    dy    = s.y_gal_mock - yb
+    dz    = s.z_gal_mock - zb
+    inside        = dx**2 + dy**2 + dz**2 < rb**2
+    dist_arr      = np.where(inside, dz + np.sqrt(np.where(inside, rb**2 - dx**2 - dy**2, 0.0)), 0.0)
+    z_end_bub_arr = s.redshifts_of_mocks - np.where(inside, dist_arr / s.R_H_per_gal, 0.0)
+    inside_gals   = np.where(inside)[0]
+
+    if len(inside_gals) == 0:
+        continuum_all = s.base_cont_eit_outside
+    else:
+        tau_post_in = calculate_taus_post_batched(
+            s.redshifts_of_mocks[inside_gals], z_end_bub_arr[inside_gals],
+            s.z_up_all[inside_gals].copy(), s.red_up_all[inside_gals],
+            s.z_lo_all[inside_gals].copy(), s.red_lo_all[inside_gals],
+            z_per_gal=s.z_wv_per_gal[inside_gals],
+            tau_wv_pref_per_gal=s.tau_wv_pref_per_gal[inside_gals],
+            I_z_end_per_gal=s.I_z_end_per_gal[inside_gals],
+            I_red_up_all=s.I_red_up_all[inside_gals],
+        )
+        tau_now_in = s.tau_prec_all[inside_gals] + tau_post_in
+        bad = np.any(tau_now_in[:, :, 30:] - tau_now_in[:, :, 29:-1] > 0, axis=2)
+        if np.any(bad):
+            for _ii, g in enumerate(inside_gals):
+                if not np.any(bad[_ii]):
+                    continue
+                ratio_g = (1 + z_end_bub_arr[g]) / (1 + s.z_wv_per_gal[g])
+                tau_now_in[_ii, bad[_ii]] = np.clip(
+                    s.tau_wv_pref_per_gal[g] * ratio_g**1.5 * (I(ratio_g) - s.I_z_end_per_gal[g]),
+                    0, np.inf,
+                )
+        tau_now_in[tau_now_in < 0] = np.inf
+        tau_now_in = np.nan_to_num(tau_now_in, nan=np.inf)
+        continuum_all = s.base_cont_eit_outside.copy()
+        continuum_all[inside_gals] = s.base_continuum[inside_gals] * np.exp(-tau_now_in)
+
+    predicted = s.flux_outside.copy()
+    if len(inside_gals) > 0:
+        flat_in = continuum_all[inside_gals].reshape(len(inside_gals) * N_INSIDE_TAU, 100)
+        predicted[inside_gals] = (flat_in @ s.direct_matrix).reshape(
+            len(inside_gals), N_INSIDE_TAU, N_BINS
+        )
+
+    model_mags = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted))
+    valid      = np.isfinite(s.obs_mag_per_gal) & np.all(np.isfinite(model_mags), axis=1)
+    diffs      = s.obs_mag_per_gal[:, np.newaxis, :] - model_mags
+    sigma_m    = (10 / np.log(10)) * s.noise_per_bin / (ADDITIVE + 2 * predicted)
+    bw_eff     = np.sqrt(BW_KDE**2 + sigma_m**2)
+    log_kde    = (
+        logsumexp(-0.5 * (diffs / bw_eff) ** 2 - np.log(bw_eff), axis=1)
+        - np.log(N_INSIDE_TAU)
+        - 0.5 * np.log(2 * np.pi)
+    )
+    return float(np.sum(log_kde[valid]))
+
 
 def run_single_inference(seed: int, n_workers: int = N_WORKERS) -> np.ndarray:
     """
@@ -205,74 +275,35 @@ def run_single_inference(seed: int, n_workers: int = N_WORKERS) -> np.ndarray:
         _base_cont_eit_outside.reshape(N_DATA * N_INSIDE_TAU, 100) @ _direct_matrix
     ).reshape(N_DATA, N_INSIDE_TAU, N_BINS)
 
-    # ── Likelihood (deterministic — no random draws) ──────────────────────────
-    def get_spectral_likelihood(xb, yb, zb, rb):
-        dx    = x_gal_mock - xb
-        dy    = y_gal_mock - yb
-        dz    = z_gal_mock - zb
-        inside        = dx**2 + dy**2 + dz**2 < rb**2
-        dist_arr      = np.where(inside, dz + np.sqrt(np.where(inside, rb**2 - dx**2 - dy**2, 0.0)), 0.0)
-        z_end_bub_arr = redshifts_of_mocks - np.where(inside, dist_arr / _R_H_per_gal, 0.0)
-        inside_gals   = np.where(inside)[0]
-
-        if len(inside_gals) == 0:
-            continuum_all = _base_cont_eit_outside
-        else:
-            tau_post_in = calculate_taus_post_batched(
-                redshifts_of_mocks[inside_gals], z_end_bub_arr[inside_gals],
-                _z_up_all[inside_gals].copy(), _red_up_all[inside_gals],
-                _z_lo_all[inside_gals].copy(), _red_lo_all[inside_gals],
-                z_per_gal=_z_wv_per_gal[inside_gals],
-                tau_wv_pref_per_gal=_tau_wv_pref_per_gal[inside_gals],
-                I_z_end_per_gal=_I_z_end_per_gal[inside_gals],
-                I_red_up_all=_I_red_up_all[inside_gals],
-            )
-            tau_now_in = _tau_prec_all[inside_gals] + tau_post_in
-            bad = np.any(tau_now_in[:, :, 30:] - tau_now_in[:, :, 29:-1] > 0, axis=2)
-            if np.any(bad):
-                for _ii, g in enumerate(inside_gals):
-                    if not np.any(bad[_ii]):
-                        continue
-                    ratio_g = (1 + z_end_bub_arr[g]) / (1 + _z_wv_per_gal[g])
-                    tau_now_in[_ii, bad[_ii]] = np.clip(
-                        _tau_wv_pref_per_gal[g] * ratio_g**1.5 * (I(ratio_g) - _I_z_end_per_gal[g]),
-                        0, np.inf,
-                    )
-            tau_now_in[tau_now_in < 0] = np.inf
-            tau_now_in = np.nan_to_num(tau_now_in, nan=np.inf)
-            continuum_all = _base_cont_eit_outside.copy()
-            continuum_all[inside_gals] = _base_continuum[inside_gals] * np.exp(-tau_now_in)
-
-        predicted = _flux_outside.copy()
-        if len(inside_gals) > 0:
-            flat_in = continuum_all[inside_gals].reshape(len(inside_gals) * N_INSIDE_TAU, 100)
-            predicted[inside_gals] = (flat_in @ _direct_matrix).reshape(
-                len(inside_gals), N_INSIDE_TAU, N_BINS
-            )
-
-        model_mags = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted))
-        valid      = np.isfinite(_obs_mag_per_gal) & np.all(np.isfinite(model_mags), axis=1)
-        diffs      = _obs_mag_per_gal[:, np.newaxis, :] - model_mags
-        _sigma_m   = (10 / np.log(10)) * _noise_per_bin / (ADDITIVE + 2 * predicted)
-        _bw_eff    = np.sqrt(BW_KDE**2 + _sigma_m**2)
-        log_kde    = (
-            logsumexp(-0.5 * (diffs / _bw_eff) ** 2 - np.log(_bw_eff), axis=1)
-            - np.log(N_INSIDE_TAU)
-            - 0.5 * np.log(2 * np.pi)
-        )
-        return float(np.sum(log_kde[valid]))
-
-    def log_likelihood(theta):
-        return get_spectral_likelihood(theta[0], theta[1], theta[2], theta[3])
-
-    def prior_transform(u):
-        return PRIOR_LO + u * (PRIOR_HI - PRIOR_LO)
+    # ── Populate module-level state, then fork ────────────────────────────────
+    # _log_likelihood and _prior_transform are module-level (picklable).
+    # Fork workers inherit _S fully populated from the parent at fork time.
+    _S.x_gal_mock          = x_gal_mock
+    _S.y_gal_mock          = y_gal_mock
+    _S.z_gal_mock          = z_gal_mock
+    _S.redshifts_of_mocks  = redshifts_of_mocks
+    _S.R_H_per_gal         = _R_H_per_gal
+    _S.tau_prec_all        = _tau_prec_all
+    _S.z_up_all            = _z_up_all
+    _S.red_up_all          = _red_up_all
+    _S.z_lo_all            = _z_lo_all
+    _S.red_lo_all          = _red_lo_all
+    _S.z_wv_per_gal        = _z_wv_per_gal
+    _S.tau_wv_pref_per_gal = _tau_wv_pref_per_gal
+    _S.I_z_end_per_gal     = _I_z_end_per_gal
+    _S.I_red_up_all        = _I_red_up_all
+    _S.base_continuum      = _base_continuum
+    _S.base_cont_eit_outside = _base_cont_eit_outside
+    _S.flux_outside        = _flux_outside
+    _S.direct_matrix       = _direct_matrix
+    _S.noise_per_bin       = _noise_per_bin
+    _S.obs_mag_per_gal     = _obs_mag_per_gal
 
     # ── Run nested sampling ───────────────────────────────────────────────────
     print(f"[seed {seed}] Running dynesty (nlive={NLIVE_PP}, dlogz={DLOGZ_PP})...", flush=True)
     with mp.get_context('fork').Pool(n_workers) as pool:
         sampler = dynesty.NestedSampler(
-            log_likelihood, prior_transform, ndim=NDIM,
+            _log_likelihood, _prior_transform, ndim=NDIM,
             nlive=NLIVE_PP, pool=pool, queue_size=n_workers,
         )
         sampler.run_nested(print_progress=True, dlogz=DLOGZ_PP)
