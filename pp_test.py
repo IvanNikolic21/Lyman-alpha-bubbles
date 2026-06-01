@@ -56,7 +56,7 @@ ADDITIVE     = 1e-18
 BW_KDE       = 0.12
 N_WORKERS    = 24
 NLIVE_PP     = 250   # reduced from 300 for speed; increase if posteriors look jagged
-DLOGZ_PP     = 1.0   # looser than production 0.5
+DLOGZ_PP     = 0.5   # match production setting — 1.0 was too loose, caused early termination
 MAIN_DIR     = '/groups/astro/ivannik/programs/Lyman-alpha-bubbles/'
 
 wave_em  = np.linspace(1214, 1225., 100) * u.Angstrom
