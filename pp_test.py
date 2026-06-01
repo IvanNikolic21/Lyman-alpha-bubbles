@@ -48,14 +48,14 @@ PRIOR_LO     = np.array([-10.0, -10.0, -10.0,  1.0])
 PRIOR_HI     = np.array([ 10.0,  10.0,  10.0, 20.0])
 NDIM         = 4
 N_DATA       = 50
-N_INSIDE_TAU = 50
+N_INSIDE_TAU = 100
 N_ITER_BUB   = 1
 N_BINS       = 11
 NOISE        = 5e-20
 ADDITIVE     = 1e-18
 BW_KDE       = 0.12
 N_WORKERS    = 24
-NLIVE_PP     = 200   # reduced from 300 for speed; increase if posteriors look jagged
+NLIVE_PP     = 250   # reduced from 300 for speed; increase if posteriors look jagged
 DLOGZ_PP     = 1.0   # looser than production 0.5
 MAIN_DIR     = '/groups/astro/ivannik/programs/Lyman-alpha-bubbles/'
 
