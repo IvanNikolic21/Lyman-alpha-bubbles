@@ -348,13 +348,18 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS) 
 
 # ── Summary plots ─────────────────────────────────────────────────────────────
 
-def plot_grid(output_dir: str) -> None:
+def plot_grid(output_dir: str, n_gal_list=None) -> None:
     files = sorted(glob.glob(os.path.join(output_dir, 'prod_ngal*.npz')))
     if not files:
         print("No result files found.", flush=True)
         return
 
     records    = [dict(np.load(f, allow_pickle=True)) for f in files]
+    if n_gal_list is not None:
+        records = [r for r in records if int(r['n_gal']) in n_gal_list]
+    if not records:
+        print("No records match the requested n_gal_list.", flush=True)
+        return
     noise_vals = sorted(set(float(r['noise']) for r in records))
     colors     = cm.plasma(np.linspace(0.15, 0.85, len(noise_vals)))
 
@@ -441,7 +446,9 @@ if __name__ == '__main__':
                         help='Maps to (n_gal, noise, seed) given n_seeds and n_gal_list.')
     parser.add_argument('--all',        action='store_true',
                         help='Run full grid sequentially')
-    parser.add_argument('--plot_only',  action='store_true')
+    parser.add_argument('--plot_only',       action='store_true')
+    parser.add_argument('--plot_n_gal_list', type=int, nargs='+', default=None,
+                        help='Only include these N values in the summary plot.')
     parser.add_argument('--output_dir', type=str,   default='prod_results')
     parser.add_argument('--n_workers',  type=int,   default=N_WORKERS)
     args = parser.parse_args()
@@ -449,7 +456,7 @@ if __name__ == '__main__':
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.plot_only:
-        plot_grid(args.output_dir)
+        plot_grid(args.output_dir, n_gal_list=args.plot_n_gal_list)
 
     else:
         # Build list of (n_gal, noise, seed) triples to run
@@ -476,4 +483,4 @@ if __name__ == '__main__':
             np.savez(out_file, **result)
             print(f"Saved {out_file}", flush=True)
 
-        plot_grid(args.output_dir)
+        plot_grid(args.output_dir, n_gal_list=args.plot_n_gal_list)
