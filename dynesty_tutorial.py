@@ -416,8 +416,8 @@ def get_spectral_likelihood(xb, yb, zb, rb):
 
     # ── 6. Gaussian likelihood in flux space ──────────────────────────────────
     # p(f_obs | θ) = (1/N) Σ_k N(f_obs ; predicted_k, σ_bin²)
-    # No magnitude transform, no ADDITIVE floor, no masking of negative flux.
-    # Negative-flux bins contribute naturally: near-zero information when obs≈0.
+    # NaN in predicted = sightline with complete absorption → zero flux.
+    np.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
     diffs = _obs_flux_per_gal[:, np.newaxis, :] - predicted    # (N_DATA, N_INSIDE_TAU, N_BINS)
     log_p = (
         logsumexp(-0.5 * (diffs / _noise_per_bin) ** 2, axis=1)  # (N_DATA, N_BINS)

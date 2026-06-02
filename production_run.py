@@ -141,6 +141,7 @@ def _log_likelihood(theta):
             len(inside_gals), N_INSIDE_TAU, N_BINS
         )
 
+    np.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
     diffs  = s.obs_flux[:, np.newaxis, :] - predicted            # (N_gal, N_INSIDE_TAU, N_BINS)
     log_p  = (
         logsumexp(-0.5 * (diffs / s.noise_per_bin) ** 2, axis=1)
