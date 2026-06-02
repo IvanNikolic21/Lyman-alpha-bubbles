@@ -372,16 +372,24 @@ def plot_grid(output_dir: str) -> None:
             by_ngal.setdefault(ng, []).append(r)
 
         ngals = sorted(by_ngal)
-        # Arrays of shape (len(ngals), n_seeds, 4)
-        std_seeds  = np.array([[s['post_std']                          for s in by_ngal[ng]] for ng in ngals])
-        bias_seeds = np.array([[s['post_median'] - s['true_mu']        for s in by_ngal[ng]] for ng in ngals])
-
-        std_med  = np.median(std_seeds,  axis=1)   # (len(ngals), 4)
-        std_lo   = np.percentile(std_seeds,  16, axis=1)
-        std_hi   = np.percentile(std_seeds,  84, axis=1)
-        bias_med = np.median(bias_seeds, axis=1)   # signed
-        bias_lo  = np.percentile(bias_seeds, 16, axis=1)
-        bias_hi  = np.percentile(bias_seeds, 84, axis=1)
+        # Compute statistics per n_gal separately — seed counts may differ
+        # if some jobs are still running.
+        std_med  = np.zeros((len(ngals), NDIM))
+        std_lo   = np.zeros((len(ngals), NDIM))
+        std_hi   = np.zeros((len(ngals), NDIM))
+        bias_med = np.zeros((len(ngals), NDIM))
+        bias_lo  = np.zeros((len(ngals), NDIM))
+        bias_hi  = np.zeros((len(ngals), NDIM))
+        for ki, ng in enumerate(ngals):
+            seeds_here = by_ngal[ng]
+            ss = np.array([s['post_std']                   for s in seeds_here])  # (n_s, 4)
+            bs = np.array([s['post_median'] - s['true_mu'] for s in seeds_here])  # (n_s, 4)
+            std_med[ki]  = np.median(ss,  axis=0)
+            std_lo[ki]   = np.percentile(ss,  16, axis=0)
+            std_hi[ki]   = np.percentile(ss,  84, axis=0)
+            bias_med[ki] = np.median(bs,  axis=0)
+            bias_lo[ki]  = np.percentile(bs,  16, axis=0)
+            bias_hi[ki]  = np.percentile(bs,  84, axis=0)
 
         label = f'{noise:.0e}'
         for pi in range(NDIM):
