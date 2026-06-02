@@ -57,12 +57,14 @@ N_GAL_GRID  = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70]
 NOISE_GRID  = [2e-20, 5e-20, 8e-20, 1e-19, 2e-19, 5e-19]
 N_COMBOS    = len(N_GAL_GRID) * len(NOISE_GRID)   # 90
 
-def job_id_to_params(job_id: int, n_seeds: int):
+def job_id_to_params(job_id: int, n_seeds: int, n_gal_list=None):
     """job_id runs over combinations first, then seeds:
-       job_id = comb_idx * n_seeds + seed_idx"""
+       job_id = comb_idx * n_seeds + seed_idx
+       n_gal_list overrides N_GAL_GRID for subset runs."""
+    gal_grid = n_gal_list if n_gal_list is not None else N_GAL_GRID
     comb_idx = job_id // n_seeds
     seed     = job_id  % n_seeds
-    n_gal    = N_GAL_GRID[comb_idx // len(NOISE_GRID)]
+    n_gal    = gal_grid[comb_idx // len(NOISE_GRID)]
     noise    = NOISE_GRID[comb_idx  % len(NOISE_GRID)]
     return n_gal, noise, seed
 
@@ -431,10 +433,12 @@ if __name__ == '__main__':
     parser.add_argument('--noise',      type=float, default=None)
     parser.add_argument('--seed',       type=int,   default=None)
     parser.add_argument('--n_seeds',    type=int,   default=5,
-                        help='Seeds per combination (0..n_seeds-1). '
-                             'Total SLURM array size = 90 * n_seeds.')
+                        help='Seeds per combination (0..n_seeds-1).')
+    parser.add_argument('--n_gal_list', type=int,   nargs='+', default=None,
+                        help='Subset of N_GAL_GRID to run, e.g. --n_gal_list 10 30 50 70. '
+                             'Determines job array size: len(n_gal_list)*6*n_seeds.')
     parser.add_argument('--job_id',     type=int,   default=None,
-                        help='0..(90*n_seeds-1): maps to (n_gal, noise, seed)')
+                        help='Maps to (n_gal, noise, seed) given n_seeds and n_gal_list.')
     parser.add_argument('--all',        action='store_true',
                         help='Run full grid sequentially')
     parser.add_argument('--plot_only',  action='store_true')
@@ -449,13 +453,14 @@ if __name__ == '__main__':
 
     else:
         # Build list of (n_gal, noise, seed) triples to run
+        gal_grid = args.n_gal_list if args.n_gal_list is not None else N_GAL_GRID
         if args.job_id is not None:
-            triples = [job_id_to_params(args.job_id, args.n_seeds)]
+            triples = [job_id_to_params(args.job_id, args.n_seeds, args.n_gal_list)]
         elif args.n_gal is not None and args.noise is not None and args.seed is not None:
             triples = [(args.n_gal, args.noise, args.seed)]
         elif args.all:
             triples = [(n, ns, s)
-                       for n in N_GAL_GRID
+                       for n in gal_grid
                        for ns in NOISE_GRID
                        for s in range(args.n_seeds)]
         else:
