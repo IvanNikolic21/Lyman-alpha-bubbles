@@ -62,6 +62,13 @@ def job_id_to_params(job_id: int, n_seeds: int, n_gal_list=None):
        job_id = comb_idx * n_seeds + seed_idx
        n_gal_list overrides N_GAL_GRID for subset runs."""
     gal_grid = n_gal_list if n_gal_list is not None else N_GAL_GRID
+    max_id   = len(gal_grid) * len(NOISE_GRID) * n_seeds - 1
+    if job_id > max_id:
+        raise ValueError(
+            f"job_id={job_id} exceeds max={max_id} "
+            f"(gal_grid={len(gal_grid)} × noise={len(NOISE_GRID)} × n_seeds={n_seeds}). "
+            f"Did you forget --n_seeds {n_seeds}?"
+        )
     comb_idx = job_id // n_seeds
     seed     = job_id  % n_seeds
     n_gal    = gal_grid[comb_idx // len(NOISE_GRID)]
