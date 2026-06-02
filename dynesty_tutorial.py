@@ -184,11 +184,9 @@ cont_filled = get_content(
 
 N_BINS = 11         # fixed spectral bins matching flux_noise_mock
 NOISE = 5e-20       # per-pixel noise added to model spectra
-ADDITIVE = 1e-18    # additive offset before log-transform to avoid log(0)
 N_ITER_BUB = 1     # must match get_content call above
 N_INSIDE_TAU = 50  # must match get_content call above
-BW_KDE = 0.12      # Gaussian KDE bandwidth in magnitude space
-N_WORKERS = 24       # parallel likelihood evaluations via multiprocessing
+N_WORKERS = 24      # parallel likelihood evaluations via multiprocessing
 
 # ── Quantities that don't depend on bubble params — precompute once ───────────
 
@@ -228,8 +226,8 @@ _raw_af = np.array([
 ])  # (N_DATA, N_SAMPLES)
 _area_factor_per_gal = np.where(_raw_af < 1e-20, 1e-5, _raw_af)
 
-# Observed spectra converted to magnitude space — avoids log10 in every call
-_obs_mag_per_gal = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * flux_noise_mock))  # (N_DATA, N_BINS)
+# Observed flux per galaxy/bin — used directly in the Gaussian likelihood
+_obs_flux_per_gal = flux_noise_mock  # (N_DATA, N_BINS)
 
 # Fixed parts of tau_wv — lets calculate_taus_post_batched skip all Cosmo.H calls
 _r_alpha_val = 6.25e8 / (4 * np.pi * (const.c / wave_Lya).to(u.Hz).value)
@@ -416,24 +414,19 @@ def get_spectral_likelihood(xb, yb, zb, rb):
         )
     _tick("5-flux_rebin")
 
-    # ── 6. KDE over all galaxies and bins in one shot ─────────────────────────
-    model_mags = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted))  # (N_DATA, N_INSIDE_TAU, N_BINS)
-    valid = (
-        np.isfinite(_obs_mag_per_gal)                          # (N_DATA, N_BINS)
-        & np.all(np.isfinite(model_mags), axis=1)
-    )
-    diffs = _obs_mag_per_gal[:, np.newaxis, :] - model_mags   # (N_DATA, N_INSIDE_TAU, N_BINS)
-    # Noise in magnitude space per sample; fold into per-sample KDE bandwidth so
-    # the likelihood is deterministic (no random draw inside the hot path).
-    _sigma_m = (10 / np.log(10)) * _noise_per_bin / (ADDITIVE + 2 * predicted)
-    _bw_eff = np.sqrt(BW_KDE**2 + _sigma_m**2)
-    log_kde = (
-        logsumexp(-0.5 * (diffs / _bw_eff) ** 2 - np.log(_bw_eff), axis=1)
+    # ── 6. Gaussian likelihood in flux space ──────────────────────────────────
+    # p(f_obs | θ) = (1/N) Σ_k N(f_obs ; predicted_k, σ_bin²)
+    # No magnitude transform, no ADDITIVE floor, no masking of negative flux.
+    # Negative-flux bins contribute naturally: near-zero information when obs≈0.
+    diffs = _obs_flux_per_gal[:, np.newaxis, :] - predicted    # (N_DATA, N_INSIDE_TAU, N_BINS)
+    log_p = (
+        logsumexp(-0.5 * (diffs / _noise_per_bin) ** 2, axis=1)  # (N_DATA, N_BINS)
         - np.log(N_INSIDE_TAU)
+        - np.log(_noise_per_bin)
         - 0.5 * np.log(2 * np.pi)
     )
-    _tick("6-KDE")
-    return float(np.sum(log_kde[valid]))
+    _tick("6-likelihood")
+    return float(log_p.sum())
 
 
 def log_likelihood(theta):

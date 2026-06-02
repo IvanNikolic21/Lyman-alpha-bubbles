@@ -52,8 +52,6 @@ N_INSIDE_TAU = 100
 N_ITER_BUB   = 1
 N_BINS       = 11
 NOISE        = 5e-20
-ADDITIVE     = 1e-18
-BW_KDE       = 0.12
 N_WORKERS    = 24
 NLIVE_PP     = 250   # reduced from 300 for speed; increase if posteriors look jagged
 DLOGZ_PP     = 0.5   # match production setting — 1.0 was too loose, caused early termination
@@ -121,17 +119,14 @@ def _log_likelihood(theta):
             len(inside_gals), N_INSIDE_TAU, N_BINS
         )
 
-    model_mags = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted))
-    valid      = np.isfinite(s.obs_mag_per_gal) & np.all(np.isfinite(model_mags), axis=1)
-    diffs      = s.obs_mag_per_gal[:, np.newaxis, :] - model_mags
-    sigma_m    = (10 / np.log(10)) * s.noise_per_bin / (ADDITIVE + 2 * predicted)
-    bw_eff     = np.sqrt(BW_KDE**2 + sigma_m**2)
-    log_kde    = (
-        logsumexp(-0.5 * (diffs / bw_eff) ** 2 - np.log(bw_eff), axis=1)
+    diffs  = s.obs_flux_per_gal[:, np.newaxis, :] - predicted    # (N_DATA, N_INSIDE_TAU, N_BINS)
+    log_p  = (
+        logsumexp(-0.5 * (diffs / s.noise_per_bin) ** 2, axis=1)
         - np.log(N_INSIDE_TAU)
+        - np.log(s.noise_per_bin)
         - 0.5 * np.log(2 * np.pi)
     )
-    return float(np.sum(log_kde[valid]))
+    return float(log_p.sum())
 
 
 def run_single_inference(seed: int, n_workers: int = N_WORKERS) -> np.ndarray:
@@ -196,7 +191,7 @@ def run_single_inference(seed: int, n_workers: int = N_WORKERS) -> np.ndarray:
         for i in range(N_DATA)
     ])
     _area_factor_per_gal = np.where(_raw_af < 1e-20, 1e-5, _raw_af)
-    _obs_mag_per_gal     = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * flux_noise_mock))
+    _obs_flux_per_gal    = flux_noise_mock   # (N_DATA, N_BINS) — raw flux
 
     _r_alpha_val         = 6.25e8 / (4 * np.pi * (const.c / wave_Lya).to(u.Hz).value)
     _tau_gp_per_gal      = 7.16e5 * ((1 + redshifts_of_mocks) / 10) ** 1.5
@@ -297,7 +292,7 @@ def run_single_inference(seed: int, n_workers: int = N_WORKERS) -> np.ndarray:
     _S.flux_outside        = _flux_outside
     _S.direct_matrix       = _direct_matrix
     _S.noise_per_bin       = _noise_per_bin
-    _S.obs_mag_per_gal     = _obs_mag_per_gal
+    _S.obs_flux_per_gal    = _obs_flux_per_gal
 
     # ── Run nested sampling ───────────────────────────────────────────────────
     print(f"[seed {seed}] Running dynesty (nlive={NLIVE_PP}, dlogz={DLOGZ_PP})...", flush=True)

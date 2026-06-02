@@ -77,8 +77,6 @@ NDIM         = 4
 N_INSIDE_TAU = 200
 N_ITER_BUB   = 1
 N_BINS       = 11
-ADDITIVE     = 1e-18
-BW_KDE       = 0.12
 N_WORKERS    = 50
 NLIVE        = 300
 DLOGZ        = 0.5
@@ -143,17 +141,14 @@ def _log_likelihood(theta):
             len(inside_gals), N_INSIDE_TAU, N_BINS
         )
 
-    model_mags = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * predicted))
-    valid      = np.isfinite(s.obs_mag) & np.all(np.isfinite(model_mags), axis=1)
-    diffs      = s.obs_mag[:, np.newaxis, :] - model_mags
-    sigma_m    = (10 / np.log(10)) * s.noise_per_bin / (ADDITIVE + 2 * predicted)
-    bw_eff     = np.sqrt(BW_KDE**2 + sigma_m**2)
-    log_kde    = (
-        logsumexp(-0.5 * (diffs / bw_eff) ** 2 - np.log(bw_eff), axis=1)
+    diffs  = s.obs_flux[:, np.newaxis, :] - predicted            # (N_gal, N_INSIDE_TAU, N_BINS)
+    log_p  = (
+        logsumexp(-0.5 * (diffs / s.noise_per_bin) ** 2, axis=1)
         - np.log(N_INSIDE_TAU)
+        - np.log(s.noise_per_bin)
         - 0.5 * np.log(2 * np.pi)
     )
-    return float(np.sum(log_kde[valid]))
+    return float(log_p.sum())
 
 
 # ── Single run ────────────────────────────────────────────────────────────────
@@ -215,7 +210,7 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS) 
         for i in range(n_gal)
     ])
     af       = np.where(raw_af < 1e-20, 1e-5, raw_af)
-    obs_mag  = 5 * np.log10(10**18.7 * (ADDITIVE + 2 * flux_noise_mock))
+    obs_flux = flux_noise_mock   # (n_gal, N_BINS) — raw flux, used in Gaussian likelihood
 
     r_alpha_val  = 6.25e8 / (4 * np.pi * (const.c / wave_Lya).to(u.Hz).value)
     tau_gp       = 7.16e5 * ((1 + redshifts) / 10) ** 1.5
@@ -307,7 +302,7 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS) 
     _S.flux_outside   = flux_outside
     _S.direct_matrix  = direct_matrix
     _S.noise_per_bin  = noise_per_bin
-    _S.obs_mag        = obs_mag
+    _S.obs_flux       = obs_flux
 
     print(f"[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Running dynesty "
           f"(nlive={NLIVE}, dlogz={DLOGZ})...", flush=True)
