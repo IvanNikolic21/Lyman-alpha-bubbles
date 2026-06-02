@@ -1,21 +1,27 @@
 """
-Production grid: vary N_DATA × NOISE to map how inference quality scales.
+Production grid: vary N_DATA × NOISE × SEED to map inference quality.
 
 N_DATA  : 1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70
 NOISE   : 2e-20, 5e-20, 8e-20, 1e-19, 2e-19, 5e-19  (per full-res pixel)
-True bubble : (0, 0, 0, 10), fixed seed=42 per combination.
+Seeds   : 0 .. n_seeds-1  (default 5 → 450 jobs total)
+True bubble : (0, 0, 0, 10)
+
+Results are aggregated across seeds at plot time:
+  - Top row   : median posterior std ± 68% CI across seeds
+  - Bottom row: SIGNED bias (median − truth) ± 68% CI across seeds
+    A band that straddles zero consistently → unbiased inference.
+    A median consistently offset → systematic model bias to investigate.
 
 Usage
 -----
-# Single combination:
-python production_run.py --n_gal 30 --noise 5e-20 --output_dir prod_results/
+# Single combination + seed:
+python production_run.py --n_gal 30 --noise 5e-20 --seed 0 --output_dir prod_results/
 
-# SLURM array (90 jobs):
-#   python production_run.py --job_id $SLURM_ARRAY_TASK_ID --output_dir prod_results/
-#   job_id 0..89, maps row-major over N_GAL_GRID × NOISE_GRID
+# SLURM array (n_seeds=5 → 450 jobs, job_id 0..449):
+#   python production_run.py --job_id $SLURM_ARRAY_TASK_ID --n_seeds 5 --output_dir prod_results/
 
-# Full grid sequentially (slow, ~90 × run-time):
-python production_run.py --all --output_dir prod_results/
+# Full grid sequentially:
+python production_run.py --all --n_seeds 5 --output_dir prod_results/
 
 # Summary plots from saved results (no new inference):
 python production_run.py --plot_only --output_dir prod_results/
@@ -49,12 +55,19 @@ from venv.helpers import full_res_flux, perturb_flux, z_at_proper_distance, I
 # ── Grid definition ───────────────────────────────────────────────────────────
 N_GAL_GRID  = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70]
 NOISE_GRID  = [2e-20, 5e-20, 8e-20, 1e-19, 2e-19, 5e-19]
+N_COMBOS    = len(N_GAL_GRID) * len(NOISE_GRID)   # 90
 
-def job_id_to_params(job_id: int):
-    return N_GAL_GRID[job_id // len(NOISE_GRID)], NOISE_GRID[job_id % len(NOISE_GRID)]
+def job_id_to_params(job_id: int, n_seeds: int):
+    """job_id runs over combinations first, then seeds:
+       job_id = comb_idx * n_seeds + seed_idx"""
+    comb_idx = job_id // n_seeds
+    seed     = job_id  % n_seeds
+    n_gal    = N_GAL_GRID[comb_idx // len(NOISE_GRID)]
+    noise    = NOISE_GRID[comb_idx  % len(NOISE_GRID)]
+    return n_gal, noise, seed
 
-def params_to_filename(n_gal: int, noise: float, output_dir: str) -> str:
-    return os.path.join(output_dir, f'prod_ngal{n_gal:03d}_noise{noise:.2e}.npz')
+def params_to_filename(n_gal: int, noise: float, seed: int, output_dir: str) -> str:
+    return os.path.join(output_dir, f'prod_ngal{n_gal:03d}_noise{noise:.2e}_seed{seed:02d}.npz')
 
 # ── Fixed settings ────────────────────────────────────────────────────────────
 TRUE_MU      = np.array([0.0, 0.0, 0.0, 10.0])
@@ -69,7 +82,6 @@ BW_KDE       = 0.12
 N_WORKERS    = 50
 NLIVE        = 300
 DLOGZ        = 0.5
-SEED         = 42
 MAIN_DIR     = '/groups/astro/ivannik/programs/Lyman-alpha-bubbles/'
 PARAM_NAMES  = ['x_bub', 'y_bub', 'z_bub', 'r_bub']
 
@@ -146,10 +158,10 @@ def _log_likelihood(theta):
 
 # ── Single run ────────────────────────────────────────────────────────────────
 
-def run_single(n_gal: int, noise: float, n_workers: int = N_WORKERS) -> dict:
-    """Run inference for one (n_gal, noise) combination. Returns result dict."""
-    np.random.seed(SEED)
-    print(f"\n[n_gal={n_gal}, noise={noise:.2e}] Generating mock data...", flush=True)
+def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS) -> dict:
+    """Run inference for one (n_gal, noise, seed) combination. Returns result dict."""
+    np.random.seed(seed)
+    print(f"\n[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Generating mock data...", flush=True)
 
     Muv_mock = np.ones(n_gal) * -18.5
     beta     = -2.0 * np.ones(n_gal)
@@ -180,7 +192,7 @@ def run_single(n_gal: int, noise: float, n_workers: int = N_WORKERS) -> dict:
     full_flux += np.random.normal(0, noise, np.shape(full_flux))
     flux_noise_mock = perturb_flux(full_flux, N_BINS)   # (n_gal, N_BINS)
 
-    print(f"[n_gal={n_gal}, noise={noise:.2e}] Building precomputed arrays...", flush=True)
+    print(f"[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Building precomputed arrays...", flush=True)
     cont_filled = get_content(
         Muv_mock.flatten(), redshifts,
         x_gal, y_gal, z_gal,
@@ -297,7 +309,7 @@ def run_single(n_gal: int, noise: float, n_workers: int = N_WORKERS) -> dict:
     _S.noise_per_bin  = noise_per_bin
     _S.obs_mag        = obs_mag
 
-    print(f"[n_gal={n_gal}, noise={noise:.2e}] Running dynesty "
+    print(f"[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Running dynesty "
           f"(nlive={NLIVE}, dlogz={DLOGZ})...", flush=True)
     import time
     t0 = time.perf_counter()
@@ -319,14 +331,14 @@ def run_single(n_gal: int, noise: float, n_workers: int = N_WORKERS) -> dict:
     post_p16    = np.percentile(equal_samples, 16, axis=0)
     post_p84    = np.percentile(equal_samples, 84, axis=0)
 
-    print(f"[n_gal={n_gal}, noise={noise:.2e}] Done in {wall_time:.1f}s", flush=True)
+    print(f"[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Done in {wall_time:.1f}s", flush=True)
     for _pi, _pn in enumerate(PARAM_NAMES):
         print(f"  {_pn:6s}  median={post_median[_pi]:.3f}  "
               f"std={post_std[_pi]:.3f}  truth={TRUE_MU[_pi]:.1f}  "
               f"[{post_p16[_pi]:.2f}, {post_p84[_pi]:.2f}]", flush=True)
 
     return dict(
-        n_gal=n_gal, noise=noise,
+        n_gal=n_gal, noise=noise, seed=seed,
         posterior_samples=equal_samples,
         post_mean=post_mean, post_median=post_median, post_std=post_std,
         post_p16=post_p16, post_p84=post_p84,
@@ -344,53 +356,67 @@ def plot_grid(output_dir: str) -> None:
         print("No result files found.", flush=True)
         return
 
-    records = [dict(np.load(f, allow_pickle=True)) for f in files]
-
-    noise_vals  = sorted(set(float(r['noise']) for r in records))
-    n_gal_vals  = sorted(set(int(r['n_gal']) for r in records))
-    colors      = cm.plasma(np.linspace(0.15, 0.85, len(noise_vals)))
+    records    = [dict(np.load(f, allow_pickle=True)) for f in files]
+    noise_vals = sorted(set(float(r['noise']) for r in records))
+    colors     = cm.plasma(np.linspace(0.15, 0.85, len(noise_vals)))
 
     fig, axes = plt.subplots(2, NDIM, figsize=(18, 8), sharex=True)
 
     for ni, noise in enumerate(noise_vals):
-        subset = sorted([r for r in records if float(r['noise']) == noise],
-                        key=lambda r: int(r['n_gal']))
-        ngals  = [int(r['n_gal'])   for r in subset]
-        stds   = np.array([r['post_std']    for r in subset])   # (N, 4)
-        biases = np.array([np.abs(r['post_median'] - r['true_mu']) for r in subset])  # (N, 4)
-        label  = f'{noise:.0e}'
+        # Group by n_gal, aggregate over seeds
+        by_ngal = {}
+        for r in records:
+            if float(r['noise']) != noise:
+                continue
+            ng = int(r['n_gal'])
+            by_ngal.setdefault(ng, []).append(r)
 
+        ngals = sorted(by_ngal)
+        # Arrays of shape (len(ngals), n_seeds, 4)
+        std_seeds  = np.array([[s['post_std']                          for s in by_ngal[ng]] for ng in ngals])
+        bias_seeds = np.array([[s['post_median'] - s['true_mu']        for s in by_ngal[ng]] for ng in ngals])
+
+        std_med  = np.median(std_seeds,  axis=1)   # (len(ngals), 4)
+        std_lo   = np.percentile(std_seeds,  16, axis=1)
+        std_hi   = np.percentile(std_seeds,  84, axis=1)
+        bias_med = np.median(bias_seeds, axis=1)   # signed
+        bias_lo  = np.percentile(bias_seeds, 16, axis=1)
+        bias_hi  = np.percentile(bias_seeds, 84, axis=1)
+
+        label = f'{noise:.0e}'
         for pi in range(NDIM):
-            axes[0, pi].plot(ngals, stds[:, pi],   color=colors[ni], lw=1.5,
+            c = colors[ni]
+            # std
+            axes[0, pi].plot(ngals, std_med[:, pi], color=c, lw=1.5,
                              marker='o', ms=4, label=label)
-            axes[1, pi].plot(ngals, biases[:, pi], color=colors[ni], lw=1.5,
+            axes[0, pi].fill_between(ngals, std_lo[:, pi], std_hi[:, pi],
+                                     color=c, alpha=0.2)
+            # signed bias
+            axes[1, pi].plot(ngals, bias_med[:, pi], color=c, lw=1.5,
                              marker='o', ms=4, label=label)
+            axes[1, pi].fill_between(ngals, bias_lo[:, pi], bias_hi[:, pi],
+                                     color=c, alpha=0.2)
 
     for pi, pname in enumerate(PARAM_NAMES):
         axes[0, pi].set_title(pname)
-        axes[0, pi].set_ylabel('Posterior std')
-        axes[1, pi].set_ylabel('|Median − truth|')
+        axes[0, pi].set_ylabel('Posterior std  (median ± 68% CI over seeds)')
+        axes[1, pi].set_ylabel('Median − truth  (± 68% CI over seeds)')
         axes[1, pi].set_xlabel('N galaxies')
-        for row in range(2):
-            axes[row, pi].axhline(0, color='k', lw=0.5, ls='--')
+        axes[1, pi].axhline(0, color='k', lw=0.8, ls='--')   # zero-bias reference
+        axes[0, pi].set_ylim(bottom=0)
 
     axes[0, -1].legend(title='Noise (flux)', fontsize=8, bbox_to_anchor=(1.02, 1))
-    fig.suptitle('Inference quality vs. N galaxies and noise level\n'
-                 'True bubble: (0, 0, 0, 10)')
+    # Count max seeds seen for any single (n_gal, noise) combination
+    from collections import Counter
+    combo_counts = Counter((int(r['n_gal']), float(r['noise'])) for r in records)
+    max_seeds = max(combo_counts.values()) if combo_counts else 1
+    fig.suptitle(f'Inference quality vs. N galaxies and noise  '
+                 f'(up to {max_seeds} seeds per combination)\n'
+                 f'True bubble: (0, 0, 0, 10)  —  shaded band = 68% CI over seeds, dashed = zero bias')
     fig.tight_layout()
     out_path = os.path.join(output_dir, 'prod_summary.png')
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     print(f"Saved {out_path}", flush=True)
-
-    # Also save a compact table to stdout
-    print(f"\n{'n_gal':>6}  {'noise':>8}  "
-          + "  ".join(f"std_{p:4s}" for p in PARAM_NAMES)
-          + "  " + "  ".join(f"bias_{p:4s}" for p in PARAM_NAMES))
-    for r in sorted(records, key=lambda r: (float(r['noise']), int(r['n_gal']))):
-        std_str  = "  ".join(f"{r['post_std'][i]:8.3f}" for i in range(NDIM))
-        bias_str = "  ".join(f"{abs(r['post_median'][i]-r['true_mu'][i]):9.3f}"
-                             for i in range(NDIM))
-        print(f"{int(r['n_gal']):6d}  {float(r['noise']):8.2e}  {std_str}  {bias_str}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -399,8 +425,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--n_gal',      type=int,   default=None)
     parser.add_argument('--noise',      type=float, default=None)
+    parser.add_argument('--seed',       type=int,   default=None)
+    parser.add_argument('--n_seeds',    type=int,   default=5,
+                        help='Seeds per combination (0..n_seeds-1). '
+                             'Total SLURM array size = 90 * n_seeds.')
     parser.add_argument('--job_id',     type=int,   default=None,
-                        help='0..89: maps to (n_gal, noise) row-major over grid')
+                        help='0..(90*n_seeds-1): maps to (n_gal, noise, seed)')
     parser.add_argument('--all',        action='store_true',
                         help='Run full grid sequentially')
     parser.add_argument('--plot_only',  action='store_true')
@@ -414,23 +444,26 @@ if __name__ == '__main__':
         plot_grid(args.output_dir)
 
     else:
-        # Build list of (n_gal, noise) pairs to run
+        # Build list of (n_gal, noise, seed) triples to run
         if args.job_id is not None:
-            pairs = [job_id_to_params(args.job_id)]
-        elif args.n_gal is not None and args.noise is not None:
-            pairs = [(args.n_gal, args.noise)]
+            triples = [job_id_to_params(args.job_id, args.n_seeds)]
+        elif args.n_gal is not None and args.noise is not None and args.seed is not None:
+            triples = [(args.n_gal, args.noise, args.seed)]
         elif args.all:
-            pairs = [(n, ns) for n in N_GAL_GRID for ns in NOISE_GRID]
+            triples = [(n, ns, s)
+                       for n in N_GAL_GRID
+                       for ns in NOISE_GRID
+                       for s in range(args.n_seeds)]
         else:
-            parser.error('Specify --n_gal + --noise, --job_id, or --all')
+            parser.error('Specify --n_gal + --noise + --seed, --job_id, or --all')
 
-        for n_gal, noise in pairs:
-            out_file = params_to_filename(n_gal, noise, args.output_dir)
+        for n_gal, noise, seed in triples:
+            out_file = params_to_filename(n_gal, noise, seed, args.output_dir)
             if os.path.exists(out_file):
                 print(f"[n_gal={n_gal}, noise={noise:.2e}] Already done, skipping.",
                       flush=True)
                 continue
-            result = run_single(n_gal, noise, n_workers=args.n_workers)
+            result = run_single(n_gal, noise, seed, n_workers=args.n_workers)
             np.savez(out_file, **result)
             print(f"Saved {out_file}", flush=True)
 
