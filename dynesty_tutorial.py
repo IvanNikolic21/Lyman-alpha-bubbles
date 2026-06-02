@@ -35,7 +35,7 @@ from astropy import constants as const
 import astropy.units as u
 from venv.galaxy_prop import get_muv, get_mock_data, get_js, tau_CGM, p_EW
 from venv.helpers import full_res_flux, perturb_flux, z_at_proper_distance, I
-from scipy.special import logsumexp
+from scipy.special import logsumexp, gammaln
 # ── Ground truth and fake data ────────────────────────────────────────────────
 
 TRUE_MU = np.array([0,0,0,10])       # what we want to recover
@@ -184,6 +184,7 @@ cont_filled = get_content(
 
 N_BINS = 11         # fixed spectral bins matching flux_noise_mock
 NOISE = 5e-20       # per-pixel noise added to model spectra
+NU_STUDENT = 3.0    # Student-t degrees of freedom (3 = heavy tails; →∞ = Gaussian)
 N_ITER_BUB = 1     # must match get_content call above
 N_INSIDE_TAU = 50  # must match get_content call above
 N_WORKERS = 24      # parallel likelihood evaluations via multiprocessing
@@ -414,16 +415,22 @@ def get_spectral_likelihood(xb, yb, zb, rb):
         )
     _tick("5-flux_rebin")
 
-    # ── 6. Gaussian likelihood in flux space ──────────────────────────────────
-    # p(f_obs | θ) = (1/N) Σ_k N(f_obs ; predicted_k, σ_bin²)
-    # NaN in predicted = sightline with complete absorption → zero flux.
+    # ── 6. Student-t likelihood in flux space ─────────────────────────────────
+    # p(f_obs | θ) = (1/N) Σ_k t_ν(f_obs ; predicted_k, σ_bin)
+    # Heavier tails than Gaussian: down-weights outlier observations,
+    # reducing leverage of any single galaxy/bin dominating the posterior.
+    # NaN predicted = complete absorption → zero flux.
     np.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
     diffs = _obs_flux_per_gal[:, np.newaxis, :] - predicted    # (N_DATA, N_INSIDE_TAU, N_BINS)
+    _log_norm = (gammaln((NU_STUDENT + 1) / 2) - gammaln(NU_STUDENT / 2)
+                 - 0.5 * np.log(np.pi * NU_STUDENT) - np.log(_noise_per_bin))
     log_p = (
-        logsumexp(-0.5 * (diffs / _noise_per_bin) ** 2, axis=1)  # (N_DATA, N_BINS)
+        logsumexp(
+            -(NU_STUDENT + 1) / 2 * np.log1p((diffs / _noise_per_bin) ** 2 / NU_STUDENT),
+            axis=1,
+        )                                                        # (N_DATA, N_BINS)
         - np.log(N_INSIDE_TAU)
-        - np.log(_noise_per_bin)
-        - 0.5 * np.log(2 * np.pi)
+        + _log_norm
     )
     _tick("6-likelihood")
     return float(log_p.sum())

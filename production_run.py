@@ -43,7 +43,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import dynesty
 from dynesty.utils import resample_equal
-from scipy.special import logsumexp
+from scipy.special import logsumexp, gammaln
 from astropy.cosmology import Planck18 as Cosmo
 from astropy import constants as const
 import astropy.units as u
@@ -79,6 +79,7 @@ NDIM         = 4
 N_INSIDE_TAU = 200
 N_ITER_BUB   = 1
 N_BINS       = 11
+NU_STUDENT   = 3.0    # Student-t degrees of freedom
 N_WORKERS    = 50
 NLIVE        = 300
 DLOGZ        = 0.5
@@ -144,12 +145,16 @@ def _log_likelihood(theta):
         )
 
     np.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
-    diffs  = s.obs_flux[:, np.newaxis, :] - predicted            # (N_gal, N_INSIDE_TAU, N_BINS)
-    log_p  = (
-        logsumexp(-0.5 * (diffs / s.noise_per_bin) ** 2, axis=1)
+    diffs     = s.obs_flux[:, np.newaxis, :] - predicted         # (N_gal, N_INSIDE_TAU, N_BINS)
+    _log_norm = (gammaln((NU_STUDENT + 1) / 2) - gammaln(NU_STUDENT / 2)
+                 - 0.5 * np.log(np.pi * NU_STUDENT) - np.log(s.noise_per_bin))
+    log_p = (
+        logsumexp(
+            -(NU_STUDENT + 1) / 2 * np.log1p((diffs / s.noise_per_bin) ** 2 / NU_STUDENT),
+            axis=1,
+        )
         - np.log(N_INSIDE_TAU)
-        - np.log(s.noise_per_bin)
-        - 0.5 * np.log(2 * np.pi)
+        + _log_norm
     )
     return float(log_p.sum())
 
@@ -189,6 +194,16 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS) 
     full_flux = full_res_flux(continuum, 7.5)
     full_flux += np.random.normal(0, noise, np.shape(full_flux))
     flux_noise_mock = perturb_flux(full_flux, N_BINS)   # (n_gal, N_BINS)
+
+    # ── Geometry diagnostics — helps identify systematic y/z asymmetry ───────
+    _inside = x_gal**2 + y_gal**2 + z_gal**2 < TRUE_MU[3]**2
+    print(f"  x: mean={x_gal.mean():+.2f}  y: mean={y_gal.mean():+.2f}  "
+          f"z: mean={z_gal.mean():+.2f}  (should be ~0 if uniform)", flush=True)
+    print(f"  Inside true bubble: {_inside.sum()}/{n_gal}  "
+          f"inside_z_mean={z_gal[_inside].mean():+.2f}" if _inside.any() else
+          f"  Inside true bubble: 0/{n_gal}", flush=True)
+    print(f"  tau_mock: min={tau_mock.min():.3f}  "
+          f"mean={tau_mock.mean():.3f}  max={tau_mock.max():.3f}", flush=True)
 
     print(f"[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Building precomputed arrays...", flush=True)
     cont_filled = get_content(

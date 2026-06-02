@@ -32,7 +32,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import dynesty
 from dynesty.utils import resample_equal
-from scipy.special import logsumexp
+from scipy.special import logsumexp, gammaln
 from scipy.stats import binom, percentileofscore
 from astropy.cosmology import Planck18 as Cosmo
 from astropy import constants as const
@@ -52,6 +52,7 @@ N_INSIDE_TAU = 100
 N_ITER_BUB   = 1
 N_BINS       = 11
 NOISE        = 5e-20
+NU_STUDENT   = 3.0    # Student-t degrees of freedom
 N_WORKERS    = 24
 NLIVE_PP     = 250   # reduced from 300 for speed; increase if posteriors look jagged
 DLOGZ_PP     = 0.5   # match production setting — 1.0 was too loose, caused early termination
@@ -120,12 +121,16 @@ def _log_likelihood(theta):
         )
 
     np.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
-    diffs  = s.obs_flux_per_gal[:, np.newaxis, :] - predicted    # (N_DATA, N_INSIDE_TAU, N_BINS)
-    log_p  = (
-        logsumexp(-0.5 * (diffs / s.noise_per_bin) ** 2, axis=1)
+    diffs     = s.obs_flux_per_gal[:, np.newaxis, :] - predicted  # (N_DATA, N_INSIDE_TAU, N_BINS)
+    _log_norm = (gammaln((NU_STUDENT + 1) / 2) - gammaln(NU_STUDENT / 2)
+                 - 0.5 * np.log(np.pi * NU_STUDENT) - np.log(s.noise_per_bin))
+    log_p = (
+        logsumexp(
+            -(NU_STUDENT + 1) / 2 * np.log1p((diffs / s.noise_per_bin) ** 2 / NU_STUDENT),
+            axis=1,
+        )
         - np.log(N_INSIDE_TAU)
-        - np.log(s.noise_per_bin)
-        - 0.5 * np.log(2 * np.pi)
+        + _log_norm
     )
     return float(log_p.sum())
 
@@ -167,6 +172,15 @@ def run_single_inference(seed: int, n_workers: int = N_WORKERS) -> np.ndarray:
     full_flux = full_res_flux(continuum, 7.5)
     full_flux += np.random.normal(0, NOISE, np.shape(full_flux))
     flux_noise_mock = perturb_flux(full_flux, N_BINS)   # (N_DATA, N_BINS)
+
+    _inside = x_gal_mock**2 + y_gal_mock**2 + z_gal_mock**2 < TRUE_MU[3]**2
+    print(f"  x: mean={x_gal_mock.mean():+.2f}  y: mean={y_gal_mock.mean():+.2f}  "
+          f"z: mean={z_gal_mock.mean():+.2f}", flush=True)
+    print(f"  Inside true bubble: {_inside.sum()}/{N_DATA}  "
+          + (f"inside_z_mean={z_gal_mock[_inside].mean():+.2f}" if _inside.any() else ""),
+          flush=True)
+    print(f"  tau_mock: min={tau_mock.min():.3f}  mean={tau_mock.mean():.3f}  "
+          f"max={tau_mock.max():.3f}", flush=True)
 
     print(f"[seed {seed}] Building precomputed arrays...", flush=True)
     cont_filled = get_content(
