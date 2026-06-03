@@ -45,7 +45,7 @@ wave_Lya     = 1215.67 * u.Angstrom
 NOISE_LEVELS = [5e-19, 2e-19, 1e-19, 5e-20, 2e-20]
 
 
-def build_state(n_gal: int, noise: float, seed: int):
+def build_state(n_gal: int, noise: float, seed: int, ew_fixed: bool = False):
     """Build the precomputed arrays for (n_gal, noise, seed). Returns a namespace."""
     import types
     np.random.seed(seed)
@@ -65,7 +65,7 @@ def build_state(n_gal: int, noise: float, seed: int):
         / np.trapz(one_J[0][i], wave_em.value)
         for i in range(n_gal)
     ])
-    _, la_e = p_EW(Muv_mock.flatten(), beta.flatten())
+    _, la_e = p_EW(Muv_mock.flatten(), beta.flatten(), EW_fixed=ew_fixed)
     la_e = la_e.reshape(np.shape(Muv_mock)) / area_factor
 
     continuum = (
@@ -83,7 +83,7 @@ def build_state(n_gal: int, noise: float, seed: int):
         n_iter_bub=N_ITER_BUB, n_inside_tau=N_INSIDE_TAU,
         include_muv_unc=False, fwhm_true=False,
         redshift=7.5, xh_unc=True, high_prob_emit=False,
-        EW_fixed=False, cache=None, AH22_model=False,
+        EW_fixed=ew_fixed, cache=None, AH22_model=False,
         main_dir=MAIN_DIR, cache_dir=None, gauss_distr=False,
     )
     R_H      = np.array([(const.c / Cosmo.H(redshifts[i])).to(u.Mpc).value for i in range(n_gal)])
@@ -277,10 +277,10 @@ def print_geometry(s):
     # pred_truth: (n_gal, N_INSIDE_TAU, N_BINS)
     # flux_outside: same shape; for outside gals pred_truth ≈ flux_outside
     signal = (pred_truth[inside_idx] - s.flux_outside[inside_idx]).mean(axis=1)  # (n_inside, N_BINS)
-    signal_snr = (signal / s.noise_per_bin).max(axis=1)   # peak bin signal per inside gal
-    n_det_sig = (signal_snr > 1).sum()
+    signal_snr = np.nanmax(signal / s.noise_per_bin, axis=1)   # peak bin signal per inside gal
+    n_det_sig = int(np.nansum(signal_snr > 1))
     print(f"  signal contrast (model): {n_det_sig}/{len(inside_idx)} inside-bubble gals with peak signal/noise>1")
-    print(f"  per-galaxy signal SNR  min={signal_snr.min():.3f}  mean={signal_snr.mean():.3f}  max={signal_snr.max():.3f}")
+    print(f"  per-galaxy signal SNR  min={np.nanmin(signal_snr):.3f}  mean={np.nanmean(signal_snr):.3f}  max={np.nanmax(signal_snr):.3f}")
     # List the individual inside-bubble galaxies with their signal SNR
     for i, g in enumerate(inside_idx):
         marker = " ***" if signal_snr[i] > 1 else ""
@@ -325,7 +325,7 @@ def print_ll_breakdown(s, peak_params):
               f"  xyz=({s.x_gal_mock[g]:.1f},{s.y_gal_mock[g]:.1f},{s.z_gal_mock[g]:.1f})")
 
 
-def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str):
+def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str, ew_fixed: bool = False):
     os.makedirs(outdir, exist_ok=True)
     r_grid = np.linspace(1, 20, n_pts)
     # Also scan each position param
@@ -344,8 +344,9 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str):
     worst_r_err = 0.0
 
     for ni, noise in enumerate(noise_levels):
-        print(f"\nBuilding state: n_gal={n_gal}, noise={noise:.1e}, seed={seed}...", flush=True)
-        s = build_state(n_gal, noise, seed)
+        print(f"\nBuilding state: n_gal={n_gal}, noise={noise:.1e}, seed={seed}"
+              f"{' [EW_fixed]' if ew_fixed else ''}...", flush=True)
+        s = build_state(n_gal, noise, seed, ew_fixed=ew_fixed)
         print(f"  State ready. Computing 4 slices × {n_pts} points...", flush=True)
 
         if not geometry_printed:
@@ -382,13 +383,15 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str):
         ax.set_title(pname)
     axes[0].set_ylabel('Δ log L  (peak = 0)', fontsize=11)
     axes[-1].legend(title='noise', fontsize=7, loc='lower left')
+    ew_label = "EW=mean" if ew_fixed else "EW=sampled"
     fig.suptitle(
         f"1-D likelihood slices through truth  |  n_gal={n_gal}, seed={seed}, "
-        f"N_INSIDE_TAU={N_INSIDE_TAU}, ν={NU_STUDENT}",
+        f"N_INSIDE_TAU={N_INSIDE_TAU}, ν={NU_STUDENT}, {ew_label}",
         fontsize=11
     )
     fig.tight_layout()
-    fname = os.path.join(outdir, f'slices_ngal{n_gal:03d}_seed{seed:02d}.png')
+    ew_suffix = "_ewfixed" if ew_fixed else ""
+    fname = os.path.join(outdir, f'slices_ngal{n_gal:03d}_seed{seed:02d}{ew_suffix}.png')
     fig.savefig(fname, dpi=150, bbox_inches='tight')
     print(f"\nSaved {fname}", flush=True)
 
@@ -415,8 +418,9 @@ if __name__ == '__main__':
     parser.add_argument('--n_pts',  type=int,   default=41,  help='grid points per slice')
     parser.add_argument('--noise',  type=float, default=None,
                         help='single noise level; if omitted, runs all NOISE_LEVELS')
-    parser.add_argument('--outdir', type=str,   default='slice_results')
+    parser.add_argument('--outdir',   type=str,            default='slice_results')
+    parser.add_argument('--ew_fixed', action='store_true', help='fix EW to mean (no random draw)')
     args = parser.parse_args()
 
     noise_levels = [args.noise] if args.noise is not None else NOISE_LEVELS
-    run_slices(args.n_gal, args.seed, noise_levels, args.n_pts, args.outdir)
+    run_slices(args.n_gal, args.seed, noise_levels, args.n_pts, args.outdir, ew_fixed=args.ew_fixed)
