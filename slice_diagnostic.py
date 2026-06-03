@@ -262,16 +262,15 @@ def print_geometry(s):
     print(f"               x: [{xi.min():.2f}, {xi.max():.2f}]  mean={xi.mean():.2f}")
     print(f"               y: [{yi.min():.2f}, {yi.max():.2f}]  mean={yi.mean():.2f}")
     print(f"               z: [{zi.min():.2f}, {zi.max():.2f}]  mean={zi.mean():.2f}")
-    # Mean flux at truth for inside vs outside, relative to noise
-    flux_in_mean  = s.flux_outside[inside_idx].mean(axis=1).mean(axis=0)   # mean over N_INSIDE_TAU then gals
-    flux_out_mean = s.flux_outside[outside_idx].mean(axis=1).mean(axis=0)
-    snr_in  = (flux_in_mean / s.noise_per_bin).mean()
-    snr_out = (flux_out_mean / s.noise_per_bin).mean()
-    print(f"  mean SNR (flux/noise)  inside={snr_in:.3f}  outside={snr_out:.3f}")
-    # What fraction of inside galaxies have any bin with SNR > 1?
-    peak_snr_per_gal = (s.flux_outside[inside_idx].mean(axis=1) / s.noise_per_bin).max(axis=1)
-    n_detectable = (peak_snr_per_gal > 1).sum()
-    print(f"  detectable inside gals (peak SNR>1): {n_detectable}/{len(inside_idx)}")
+    # Per-galaxy observed SNR: peak |obs| / noise — this tells you if the observation is informative
+    # For inside-bubble galaxies the real signal is obs_flux relative to noise (not outside-model flux)
+    obs_peak_snr = np.abs(s.obs_flux) / s.noise_per_bin   # (n_gal, n_bins)
+    obs_peak_in  = obs_peak_snr[inside_idx].max(axis=1)   # peak SNR per inside gal
+    obs_peak_out = obs_peak_snr[outside_idx].max(axis=1)
+    n_detectable = (obs_peak_in > 1).sum()
+    print(f"  observed peak SNR>1: {n_detectable}/{len(inside_idx)} inside-bubble gals")
+    print(f"  obs SNR  inside: mean={obs_peak_in.mean():.2f}  max={obs_peak_in.max():.2f}"
+          f"  |  outside: mean={obs_peak_out.mean():.2f}  max={obs_peak_out.max():.2f}")
 
 
 def print_ll_breakdown(s, peak_params):

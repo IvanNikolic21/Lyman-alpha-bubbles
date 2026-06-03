@@ -270,8 +270,7 @@ def get_mock_data(
                     nf=0.65
                 ) + shift_sm, a_min=0.0, a_max=np.inf)
 
-            print("It happens for mocks:", tau, flush=True)
-            print(x_b, y_b,z_b, r_bubs, z_end_bub, xs, ys, dist, flush=True)
+            pass
 
         tau = np.nan_to_num(tau, np.inf)
         tau_data[i, :] = tau
