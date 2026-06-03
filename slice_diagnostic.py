@@ -164,6 +164,10 @@ def build_state(n_gal: int, noise: float, seed: int):
         base_cont_outside.reshape(n_gal * N_INSIDE_TAU, 100) @ direct_matrix
     ).reshape(n_gal, N_INSIDE_TAU, N_BINS)
 
+    # True inside-bubble flags (truth: center=0,0,0, r=10)
+    dist_from_center = np.sqrt(x_gal**2 + y_gal**2 + z_gal**2)
+    inside_true = dist_from_center < 10.0
+
     s = types.SimpleNamespace(
         x_gal_mock=x_gal, y_gal_mock=y_gal, z_gal_mock=z_gal,
         redshifts=redshifts, R_H=R_H,
@@ -174,11 +178,12 @@ def build_state(n_gal: int, noise: float, seed: int):
         base_cont=base_cont, base_cont_outside=base_cont_outside,
         flux_outside=flux_outside, direct_matrix=direct_matrix,
         noise_per_bin=noise_per_bin, obs_flux=flux_noise_mock,
+        dist_from_center=dist_from_center, inside_true=inside_true,
     )
     return s
 
 
-def log_likelihood(s, xb, yb, zb, rb):
+def log_likelihood(s, xb, yb, zb, rb, per_galaxy=False):
     dx = s.x_gal_mock - xb
     dy = s.y_gal_mock - yb
     dz = s.z_gal_mock - zb
@@ -233,7 +238,76 @@ def log_likelihood(s, xb, yb, zb, rb):
         - np.log(N_INSIDE_TAU)
         + _log_norm
     )
-    return float(log_p.sum())
+    per_gal = log_p.sum(axis=1)   # shape (n_gal,)
+    if per_galaxy:
+        return per_gal
+    return float(per_gal.sum())
+
+
+def print_geometry(s):
+    """Print galaxy geometry and signal diagnostics relative to the true bubble."""
+    n = len(s.x_gal_mock)
+    inside_idx = np.where(s.inside_true)[0]
+    outside_idx = np.where(~s.inside_true)[0]
+    print(f"\n  ── Galaxy geometry (truth: center=0,0,0  r=10) ──")
+    print(f"  n_gal={n}  n_inside={len(inside_idx)}  n_outside={len(outside_idx)}")
+    if len(inside_idx) == 0:
+        print("  WARNING: zero inside-bubble galaxies at truth!")
+        return
+    xi = s.x_gal_mock[inside_idx]
+    yi = s.y_gal_mock[inside_idx]
+    zi = s.z_gal_mock[inside_idx]
+    di = s.dist_from_center[inside_idx]
+    print(f"  inside gals  dist: min={di.min():.2f}  mean={di.mean():.2f}  max={di.max():.2f}")
+    print(f"               x: [{xi.min():.2f}, {xi.max():.2f}]  mean={xi.mean():.2f}")
+    print(f"               y: [{yi.min():.2f}, {yi.max():.2f}]  mean={yi.mean():.2f}")
+    print(f"               z: [{zi.min():.2f}, {zi.max():.2f}]  mean={zi.mean():.2f}")
+    # Mean flux at truth for inside vs outside, relative to noise
+    flux_in_mean  = s.flux_outside[inside_idx].mean(axis=1).mean(axis=0)   # mean over N_INSIDE_TAU then gals
+    flux_out_mean = s.flux_outside[outside_idx].mean(axis=1).mean(axis=0)
+    snr_in  = (flux_in_mean / s.noise_per_bin).mean()
+    snr_out = (flux_out_mean / s.noise_per_bin).mean()
+    print(f"  mean SNR (flux/noise)  inside={snr_in:.3f}  outside={snr_out:.3f}")
+    # What fraction of inside galaxies have any bin with SNR > 1?
+    peak_snr_per_gal = (s.flux_outside[inside_idx].mean(axis=1) / s.noise_per_bin).max(axis=1)
+    n_detectable = (peak_snr_per_gal > 1).sum()
+    print(f"  detectable inside gals (peak SNR>1): {n_detectable}/{len(inside_idx)}")
+
+
+def print_ll_breakdown(s, peak_params):
+    """
+    For the truth and the slice peak, print per-galaxy LL contributions and
+    identify which galaxies drive the preference for peak_params over truth.
+    """
+    truth = TRUE_MU.copy().astype(float)
+    ll_truth = log_likelihood(s, *truth, per_galaxy=True)
+    ll_peak  = log_likelihood(s, *peak_params, per_galaxy=True)
+    delta    = ll_peak - ll_truth   # positive = peak is better for this galaxy
+
+    inside_idx  = np.where(s.inside_true)[0]
+    outside_idx = np.where(~s.inside_true)[0]
+
+    print(f"\n  ── LL breakdown: truth={truth}  peak={np.round(peak_params, 2)} ──")
+    print(f"  Total ΔLL (peak − truth) = {delta.sum():.2f}")
+    print(f"  Inside  gals: ΔLL sum = {delta[inside_idx].sum():.2f}"
+          f"  mean = {delta[inside_idx].mean():.2f}")
+    print(f"  Outside gals: ΔLL sum = {delta[outside_idx].sum():.2f}"
+          f"  mean = {delta[outside_idx].mean():.2f}")
+
+    # Top 5 galaxies that most prefer the peak over truth
+    top5 = np.argsort(delta)[::-1][:5]
+    print(f"  Top 5 gals preferring peak (idx, Δll, in/out, dist_from_center):")
+    for g in top5:
+        flag = 'IN ' if s.inside_true[g] else 'out'
+        print(f"    gal {g:3d}  Δll={delta[g]:+.2f}  {flag}  dist={s.dist_from_center[g]:.2f}"
+              f"  xyz=({s.x_gal_mock[g]:.1f},{s.y_gal_mock[g]:.1f},{s.z_gal_mock[g]:.1f})")
+    # Bottom 5 (most prefer truth)
+    bot5 = np.argsort(delta)[:5]
+    print(f"  Top 5 gals preferring truth (idx, Δll, in/out, dist_from_center):")
+    for g in bot5:
+        flag = 'IN ' if s.inside_true[g] else 'out'
+        print(f"    gal {g:3d}  Δll={delta[g]:+.2f}  {flag}  dist={s.dist_from_center[g]:.2f}"
+              f"  xyz=({s.x_gal_mock[g]:.1f},{s.y_gal_mock[g]:.1f},{s.z_gal_mock[g]:.1f})")
 
 
 def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str):
@@ -248,10 +322,20 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str):
     fig, axes = plt.subplots(1, 4, figsize=(18, 4))
 
     all_peaks = {}
+    geometry_printed = False
+    worst_noise = None
+    worst_state = None
+    worst_peaks = None
+    worst_r_err = 0.0
+
     for ni, noise in enumerate(noise_levels):
         print(f"\nBuilding state: n_gal={n_gal}, noise={noise:.1e}, seed={seed}...", flush=True)
         s = build_state(n_gal, noise, seed)
         print(f"  State ready. Computing 4 slices × {n_pts} points...", flush=True)
+
+        if not geometry_printed:
+            print_geometry(s)
+            geometry_printed = True
 
         peaks = []
         for pi, (ax, pname, pgrid) in enumerate(zip(axes, PARAM_NAMES, grids)):
@@ -268,6 +352,14 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str):
             print(f"  {pname}: peak at {peak_v:.2f}  (truth={TRUE_MU[pi]:.1f})", flush=True)
 
         all_peaks[noise] = peaks
+
+        # Track the noise level where r_bub is most wrong (for LL breakdown)
+        r_err = abs(peaks[3] - TRUE_MU[3])
+        if r_err > worst_r_err:
+            worst_r_err = r_err
+            worst_noise = noise
+            worst_state = s
+            worst_peaks = peaks
 
     for pi, (ax, pname) in enumerate(zip(axes, PARAM_NAMES)):
         ax.axvline(TRUE_MU[pi], color='red', ls='--', lw=1.5, label='truth')
@@ -289,9 +381,14 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str):
     print("\n── Peak positions (truth = [0, 0, 0, 10]) ────────────────────────────")
     header = f"{'noise':>10s}  " + "  ".join(f"{p:>8s}" for p in PARAM_NAMES)
     print(header)
-    for noise, peaks in sorted(all_peaks.items()):
-        row = f"{noise:>10.1e}  " + "  ".join(f"{v:>8.2f}" for v in peaks)
+    for noise_key, peaks in sorted(all_peaks.items()):
+        row = f"{noise_key:>10.1e}  " + "  ".join(f"{v:>8.2f}" for v in peaks)
         print(row)
+
+    # Per-galaxy LL breakdown at worst noise level
+    if worst_r_err > 0.5 and worst_state is not None:
+        print(f"\n  [LL breakdown at noise={worst_noise:.1e} where |r_peak - 10| = {worst_r_err:.2f}]")
+        print_ll_breakdown(worst_state, worst_peaks)
 
     return all_peaks
 
