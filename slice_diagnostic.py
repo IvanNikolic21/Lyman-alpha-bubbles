@@ -183,7 +183,7 @@ def build_state(n_gal: int, noise: float, seed: int):
     return s
 
 
-def log_likelihood(s, xb, yb, zb, rb, per_galaxy=False):
+def log_likelihood(s, xb, yb, zb, rb, per_galaxy=False, return_predicted=False):
     dx = s.x_gal_mock - xb
     dy = s.y_gal_mock - yb
     dz = s.z_gal_mock - zb
@@ -239,6 +239,8 @@ def log_likelihood(s, xb, yb, zb, rb, per_galaxy=False):
         + _log_norm
     )
     per_gal = log_p.sum(axis=1)   # shape (n_gal,)
+    if return_predicted:
+        return per_gal, predicted   # predicted: (n_gal, N_INSIDE_TAU, N_BINS)
     if per_galaxy:
         return per_gal
     return float(per_gal.sum())
@@ -262,15 +264,29 @@ def print_geometry(s):
     print(f"               x: [{xi.min():.2f}, {xi.max():.2f}]  mean={xi.mean():.2f}")
     print(f"               y: [{yi.min():.2f}, {yi.max():.2f}]  mean={yi.mean():.2f}")
     print(f"               z: [{zi.min():.2f}, {zi.max():.2f}]  mean={zi.mean():.2f}")
-    # Per-galaxy observed SNR: peak |obs| / noise — this tells you if the observation is informative
-    # For inside-bubble galaxies the real signal is obs_flux relative to noise (not outside-model flux)
+    # Observed SNR: peak |obs_flux| / noise — noise-dominated at high noise, but still useful
     obs_peak_snr = np.abs(s.obs_flux) / s.noise_per_bin   # (n_gal, n_bins)
-    obs_peak_in  = obs_peak_snr[inside_idx].max(axis=1)   # peak SNR per inside gal
+    obs_peak_in  = obs_peak_snr[inside_idx].max(axis=1)
     obs_peak_out = obs_peak_snr[outside_idx].max(axis=1)
-    n_detectable = (obs_peak_in > 1).sum()
-    print(f"  observed peak SNR>1: {n_detectable}/{len(inside_idx)} inside-bubble gals")
-    print(f"  obs SNR  inside: mean={obs_peak_in.mean():.2f}  max={obs_peak_in.max():.2f}"
-          f"  |  outside: mean={obs_peak_out.mean():.2f}  max={obs_peak_out.max():.2f}")
+    n_det_obs = (obs_peak_in > 1).sum()
+    print(f"  obs SNR>1: {n_det_obs}/{len(inside_idx)} inside-bubble gals  "
+          f"(inside mean={obs_peak_in.mean():.2f}  outside mean={obs_peak_out.mean():.2f})")
+
+    # Signal contrast: (flux_inside_truth - flux_outside) / noise — the *model* discriminating power
+    _, pred_truth = log_likelihood(s, *TRUE_MU, return_predicted=True)
+    # pred_truth: (n_gal, N_INSIDE_TAU, N_BINS)
+    # flux_outside: same shape; for outside gals pred_truth ≈ flux_outside
+    signal = (pred_truth[inside_idx] - s.flux_outside[inside_idx]).mean(axis=1)  # (n_inside, N_BINS)
+    signal_snr = (signal / s.noise_per_bin).max(axis=1)   # peak bin signal per inside gal
+    n_det_sig = (signal_snr > 1).sum()
+    print(f"  signal contrast (model): {n_det_sig}/{len(inside_idx)} inside-bubble gals with peak signal/noise>1")
+    print(f"  per-galaxy signal SNR  min={signal_snr.min():.3f}  mean={signal_snr.mean():.3f}  max={signal_snr.max():.3f}")
+    # List the individual inside-bubble galaxies with their signal SNR
+    for i, g in enumerate(inside_idx):
+        marker = " ***" if signal_snr[i] > 1 else ""
+        print(f"    gal {g:3d}  dist={s.dist_from_center[g]:.2f}"
+              f"  xyz=({s.x_gal_mock[g]:.1f},{s.y_gal_mock[g]:.1f},{s.z_gal_mock[g]:.1f})"
+              f"  sig_SNR={signal_snr[i]:.3f}{marker}")
 
 
 def print_ll_breakdown(s, peak_params):
