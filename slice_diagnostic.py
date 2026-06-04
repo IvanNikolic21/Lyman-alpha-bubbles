@@ -204,8 +204,9 @@ def build_state(n_gal: int, noise: float, seed: int, ew_fixed: bool = False, lae
         # A galaxy outside the bubble has large tau_mock → exp(-tau) ≈ 0 → EW_obs ≈ 0,
         # regardless of intrinsic EW. So we must check the actual observed flux.
         tau_cgm_arr = tau_CGM(Muv_mock, main_dir=MAIN_DIR)          # (n_gal, 100)
-        numer = np.trapz(j_s * np.exp(-tau_mock) * tau_cgm_arr, wave_em.value, axis=1)
-        denom = np.trapz(j_s * tau_cgm_arr, wave_em.value, axis=1)
+        j_s_mean = j_s.mean(axis=1)                                  # (n_gal, 100)
+        numer = np.trapz(j_s_mean * np.exp(-tau_mock) * tau_cgm_arr, wave_em.value, axis=1)
+        denom = np.trapz(j_s_mean * tau_cgm_arr, wave_em.value, axis=1)
         ew_eff = ews * np.where(denom > 1e-30, numer / denom, 0.0)  # (n_gal,)
         lae_mask = np.where(ew_eff > LAE_EW_THRESH)[0]
         if len(lae_mask) == 0:
