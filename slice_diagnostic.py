@@ -52,7 +52,7 @@ _LAE_PERM_FIELDS = [
     'tau_prec', 'z_up', 'red_up', 'z_lo', 'red_lo',
     'z_wv', 'tau_wv_pref', 'I_z_end', 'I_red_up',
     'base_cont', 'base_cont_outside', 'flux_outside',
-    'obs_flux', 'dist_from_center', 'inside_true',
+    'obs_flux', 'dist_from_center', 'inside_true', 'ew_eff',
 ]
 
 
@@ -185,6 +185,16 @@ def build_state(n_gal: int, noise: float, seed: int, ew_fixed: bool = False, lae
     dist_from_center = np.sqrt(x_gal**2 + y_gal**2 + z_gal**2)
     inside_true = dist_from_center < 10.0
 
+    # Observed EW after IGM+CGM for every galaxy:
+    # EW_eff[i] = EW_intrinsic[i] × T_IGM[i]
+    # T_IGM[i] = trapz(j_s × exp(-tau_mock) × tau_cgm) / trapz(j_s × tau_cgm)
+    # Outside-bubble galaxies have tau_mock >> 1 → exp(-tau) ≈ 0 → EW_eff ≈ 0.
+    _tau_cgm_arr = tau_CGM(Muv_mock, main_dir=MAIN_DIR)       # (n_gal, 100)
+    _j_s_mean    = j_s.mean(axis=1)                            # (n_gal, 100)
+    _numer = np.trapz(_j_s_mean * np.exp(-tau_mock) * _tau_cgm_arr, wave_em.value, axis=1)
+    _denom = np.trapz(_j_s_mean * _tau_cgm_arr,                wave_em.value, axis=1)
+    ew_eff = ews * np.where(_denom > 1e-30, _numer / _denom, 0.0)  # (n_gal,)
+
     s = types.SimpleNamespace(
         x_gal_mock=x_gal, y_gal_mock=y_gal, z_gal_mock=z_gal,
         redshifts=redshifts, R_H=R_H,
@@ -196,19 +206,11 @@ def build_state(n_gal: int, noise: float, seed: int, ew_fixed: bool = False, lae
         flux_outside=flux_outside, direct_matrix=direct_matrix,
         noise_per_bin=noise_per_bin, obs_flux=flux_noise_mock,
         dist_from_center=dist_from_center, inside_true=inside_true,
+        ew_eff=ew_eff,
     )
 
     if lae_first:
-        # Observed EW = intrinsic EW × T_IGM, where T_IGM is the weighted IGM transmission.
-        # T_IGM[i] = trapz(j_s[i] * exp(-tau_mock[i]) * tau_cgm[i]) / trapz(j_s[i] * tau_cgm[i])
-        # A galaxy outside the bubble has large tau_mock → exp(-tau) ≈ 0 → EW_obs ≈ 0,
-        # regardless of intrinsic EW. So we must check the actual observed flux.
-        tau_cgm_arr = tau_CGM(Muv_mock, main_dir=MAIN_DIR)          # (n_gal, 100)
-        j_s_mean = j_s.mean(axis=1)                                  # (n_gal, 100)
-        numer = np.trapz(j_s_mean * np.exp(-tau_mock) * tau_cgm_arr, wave_em.value, axis=1)
-        denom = np.trapz(j_s_mean * tau_cgm_arr, wave_em.value, axis=1)
-        ew_eff = ews * np.where(denom > 1e-30, numer / denom, 0.0)  # (n_gal,)
-        lae_mask = np.where(ew_eff > LAE_EW_THRESH)[0]
+        lae_mask = np.where(s.ew_eff > LAE_EW_THRESH)[0]
         if len(lae_mask) == 0:
             print(f"  WARNING: no galaxy with EW_eff > {LAE_EW_THRESH} Å (max={ew_eff.max():.1f}); "
                   f"lae_first condition not satisfied for this seed.", flush=True)
@@ -332,18 +334,26 @@ def print_geometry(s):
     # Signal contrast: (flux_inside_truth - flux_outside) / noise — the *model* discriminating power
     _, pred_truth = log_likelihood(s, *TRUE_MU, return_predicted=True)
     # pred_truth: (n_gal, N_INSIDE_TAU, N_BINS)
-    # flux_outside: same shape; for outside gals pred_truth ≈ flux_outside
     signal = (pred_truth[inside_idx] - s.flux_outside[inside_idx]).mean(axis=1)  # (n_inside, N_BINS)
-    signal_snr = np.nanmax(signal / s.noise_per_bin, axis=1)   # peak bin signal per inside gal
+    signal_snr = np.nanmax(signal / s.noise_per_bin, axis=1)
     n_det_sig = int(np.nansum(signal_snr > 1))
     print(f"  signal contrast (model): {n_det_sig}/{len(inside_idx)} inside-bubble gals with peak signal/noise>1")
     print(f"  per-galaxy signal SNR  min={np.nanmin(signal_snr):.3f}  mean={np.nanmean(signal_snr):.3f}  max={np.nanmax(signal_snr):.3f}")
-    # List the individual inside-bubble galaxies with their signal SNR
     for i, g in enumerate(inside_idx):
         marker = " ***" if signal_snr[i] > 1 else ""
         print(f"    gal {g:3d}  dist={s.dist_from_center[g]:.2f}"
               f"  xyz=({s.x_gal_mock[g]:.1f},{s.y_gal_mock[g]:.1f},{s.z_gal_mock[g]:.1f})"
-              f"  sig_SNR={signal_snr[i]:.3f}{marker}")
+              f"  sig_SNR={signal_snr[i]:.3f}  EW_eff={s.ew_eff[g]:.1f}Å{marker}")
+
+    # EW after IGM+CGM: overall emitter fractions
+    n_lae = int((s.ew_eff > LAE_EW_THRESH).sum())
+    noise_int = np.sqrt(N_BINS) * s.noise_per_bin.mean()
+    pred_mean_all = pred_truth.mean(axis=1)              # (n_gal, N_BINS)
+    det_snr_all   = pred_mean_all.sum(axis=1) / noise_int  # integrated SNR at truth
+    n_5sig = int((det_snr_all > 5).sum())
+    print(f"  EW_eff > {LAE_EW_THRESH:.0f}Å (LAE): {n_lae}/{n}  "
+          f"|  5σ detectable at truth: {n_5sig}/{n}", flush=True)
+    return pred_truth   # returned so plot_ew_histogram can reuse it
 
 
 def print_ll_breakdown(s, peak_params, censored=False):
@@ -382,6 +392,60 @@ def print_ll_breakdown(s, peak_params, censored=False):
               f"  xyz=({s.x_gal_mock[g]:.1f},{s.y_gal_mock[g]:.1f},{s.z_gal_mock[g]:.1f})")
 
 
+def plot_ew_histogram(s, pred_truth, noise, outdir, fname_prefix):
+    """
+    Histogram of observed EW (after IGM+CGM) for all galaxies.
+    Inside-bubble galaxies are red, outside blue.
+    Vertical lines: LAE threshold (25Å) and 5σ detection limit.
+    """
+    n = len(s.x_gal_mock)
+    inside_idx  = np.where(s.inside_true)[0]
+    outside_idx = np.where(~s.inside_true)[0]
+
+    pred_mean = pred_truth.mean(axis=1)                   # (n_gal, N_BINS)
+    noise_int = np.sqrt(N_BINS) * s.noise_per_bin.mean()
+    det_snr   = pred_mean.sum(axis=1) / noise_int         # (n_gal,)
+
+    # 5σ EW threshold: derived from the median flux-per-EW ratio of inside-bubble galaxies
+    inside_bright = inside_idx[s.ew_eff[inside_idx] > 1.0]
+    if len(inside_bright) > 0:
+        flux_per_ew = pred_mean[inside_bright].sum(axis=1) / s.ew_eff[inside_bright]
+        ew_5sigma = 5 * noise_int / np.median(flux_per_ew)
+    else:
+        ew_5sigma = None
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ew_max = max(s.ew_eff.max() * 1.1, 30.0)
+    bins = np.linspace(0, ew_max, 35)
+
+    ax.hist(s.ew_eff[outside_idx], bins=bins, alpha=0.55, color='steelblue',
+            label=f'outside ({len(outside_idx)})', zorder=2)
+    ax.hist(s.ew_eff[inside_idx],  bins=bins, alpha=0.80, color='tomato',
+            label=f'inside ({len(inside_idx)})',  zorder=3)
+
+    ax.axvline(LAE_EW_THRESH, color='black',      ls='--', lw=1.5, label=f'LAE ({LAE_EW_THRESH:.0f}Å)')
+    if ew_5sigma is not None:
+        ax.axvline(ew_5sigma, color='darkorange', ls=':',  lw=1.8,
+                   label=f'5σ limit ≈{ew_5sigma:.0f}Å  (noise={noise:.0e})')
+
+    n_lae  = int((s.ew_eff > LAE_EW_THRESH).sum())
+    n_5sig = int((det_snr > 5).sum())
+    ax.set_xlabel('Observed EW after IGM+CGM (Å)', fontsize=11)
+    ax.set_ylabel('Count', fontsize=11)
+    ax.legend(fontsize=9)
+    ax.set_title(
+        f'EW distribution | {fname_prefix}\n'
+        f'LAE (EW>{LAE_EW_THRESH:.0f}Å): {n_lae}/{n} = {100*n_lae/n:.0f}%'
+        f'   5σ detectable: {n_5sig}/{n} = {100*n_5sig/n:.0f}%',
+        fontsize=10,
+    )
+    fig.tight_layout()
+    fname = os.path.join(outdir, f'{fname_prefix}_ew_hist.png')
+    fig.savefig(fname, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved EW histogram → {fname}", flush=True)
+
+
 def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str,
                ew_fixed: bool = False, censored: bool = False, lae_first: bool = False):
     os.makedirs(outdir, exist_ok=True)
@@ -408,7 +472,13 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str,
         print(f"  State ready. Computing 4 slices × {n_pts} points...", flush=True)
 
         if not geometry_printed:
-            print_geometry(s)
+            ew_suffix  = "_ewfixed"  if ew_fixed  else ""
+            cen_suffix = "_censored" if censored  else ""
+            lae_suffix = "_laefirst" if lae_first else ""
+            seed_tag = f"ngal{n_gal:03d}_seed{seed:02d}{ew_suffix}{cen_suffix}{lae_suffix}"
+            pred_truth = print_geometry(s)
+            if pred_truth is not None:
+                plot_ew_histogram(s, pred_truth, noise, outdir, seed_tag)
             geometry_printed = True
 
         peaks = []
