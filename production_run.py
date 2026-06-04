@@ -43,7 +43,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import dynesty
 from dynesty.utils import resample_equal
-from scipy.special import logsumexp, gammaln
+from scipy.special import logsumexp, gammaln, stdtr
 from astropy.cosmology import Planck18 as Cosmo
 from astropy import constants as const
 import astropy.units as u
@@ -75,8 +75,10 @@ def job_id_to_params(job_id: int, n_seeds: int, n_gal_list=None):
     noise    = NOISE_GRID[comb_idx  % len(NOISE_GRID)]
     return n_gal, noise, seed
 
-def params_to_filename(n_gal: int, noise: float, seed: int, output_dir: str) -> str:
-    return os.path.join(output_dir, f'prod_ngal{n_gal:03d}_noise{noise:.2e}_seed{seed:02d}.npz')
+def params_to_filename(n_gal: int, noise: float, seed: int, output_dir: str,
+                       censored: bool = False, lae_first: bool = False) -> str:
+    suffix = ("_censored" if censored else "") + ("_laefirst" if lae_first else "")
+    return os.path.join(output_dir, f'prod_ngal{n_gal:03d}_noise{noise:.2e}_seed{seed:02d}{suffix}.npz')
 
 # ── Fixed settings ────────────────────────────────────────────────────────────
 TRUE_MU      = np.array([0.0, 0.0, 0.0, 10.0])
@@ -92,12 +94,25 @@ NLIVE        = 300
 DLOGZ        = 0.5
 MAIN_DIR     = '/groups/astro/ivannik/programs/Lyman-alpha-bubbles/'
 PARAM_NAMES  = ['x_bub', 'y_bub', 'z_bub', 'r_bub']
+SNR_DET_THRESH = 1.0    # peak obs SNR below which a galaxy is treated as non-detected
+LAE_EW_THRESH  = 25.0   # minimum observed EW (Å) to qualify as a LAE
 
 wave_em  = np.linspace(1214, 1225., 100) * u.Angstrom
 wave_Lya = 1215.67 * u.Angstrom
 
 # ── Module-level state (populated before fork, inherited by workers) ──────────
 _S = _types.SimpleNamespace()
+
+_S_PERM_FIELDS = [
+    'x_gal_mock', 'y_gal_mock', 'z_gal_mock', 'redshifts', 'R_H',
+    'tau_prec', 'z_up', 'red_up', 'z_lo', 'red_lo',
+    'z_wv', 'tau_wv_pref', 'I_z_end', 'I_red_up',
+    'base_cont', 'base_cont_outside', 'flux_outside', 'obs_flux',
+]
+
+def _permute_S(perm):
+    for f in _S_PERM_FIELDS:
+        setattr(_S, f, getattr(_S, f)[perm])
 
 
 def _prior_transform(u):
@@ -163,12 +178,25 @@ def _log_likelihood(theta):
         - np.log(N_INSIDE_TAU)
         + _log_norm
     )
-    return float(log_p.sum())
+    per_gal = log_p.sum(axis=1)   # (n_gal,)
+
+    if getattr(s, 'censored', False):
+        obs_peak_snr = np.max(np.abs(s.obs_flux) / s.noise_per_bin, axis=-1)
+        detected = obs_peak_snr > SNR_DET_THRESH
+        if not np.all(detected):
+            det_threshold = SNR_DET_THRESH * s.noise_per_bin
+            z_cdf = (det_threshold - predicted) / s.noise_per_bin
+            log_cdf = np.log(stdtr(NU_STUDENT, z_cdf))
+            log_p_nondet = logsumexp(log_cdf.sum(axis=2), axis=1) - np.log(N_INSIDE_TAU)
+            per_gal = np.where(detected, per_gal, log_p_nondet)
+
+    return float(per_gal.sum())
 
 
 # ── Single run ────────────────────────────────────────────────────────────────
 
-def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS) -> dict:
+def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS,
+               censored: bool = False, lae_first: bool = False) -> dict:
     """Run inference for one (n_gal, noise, seed) combination. Returns result dict."""
     np.random.seed(seed)
     print(f"\n[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Generating mock data...", flush=True)
@@ -190,7 +218,7 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS) 
         / np.trapz(one_J[0][i], wave_em.value)
         for i in range(n_gal)
     ])
-    _, la_e = p_EW(Muv_mock.flatten(), beta.flatten())
+    ews, la_e = p_EW(Muv_mock.flatten(), beta.flatten())
     la_e = la_e.reshape(np.shape(Muv_mock)) / area_factor
 
     continuum = (
@@ -307,6 +335,33 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS) 
         base_cont_outside.reshape(n_gal * N_INSIDE_TAU, 100) @ direct_matrix
     ).reshape(n_gal, N_INSIDE_TAU, N_BINS)
 
+    # ── LAE-first: swap the first galaxy with the highest observed-EW one ────────
+    lae_mask = np.array([], dtype=int)
+    perm     = np.arange(n_gal)
+    if lae_first:
+        tau_cgm_arr = tau_CGM(Muv_mock, main_dir=MAIN_DIR)      # (n_gal, 100)
+        j_s_arr = np.array([cont_filled.j_s_full[i] for i in range(n_gal)])
+        j_s_mean = j_s_arr.mean(axis=1)                         # (n_gal, 100)
+        numer_ew = np.trapz(j_s_mean * np.exp(-tau_mock) * tau_cgm_arr, wave_em.value, axis=1)
+        denom_ew = np.trapz(j_s_mean * tau_cgm_arr,               wave_em.value, axis=1)
+        ew_eff   = ews * np.where(denom_ew > 1e-30, numer_ew / denom_ew, 0.0)
+        lae_mask = np.where(ew_eff > LAE_EW_THRESH)[0]
+        if len(lae_mask) == 0:
+            print(f"  WARNING: no LAE found (max EW_eff={ew_eff.max():.1f}Å); "
+                  f"lae_first not applied.", flush=True)
+        elif lae_mask[0] != 0:
+            k = lae_mask[0]
+            perm = np.arange(n_gal)
+            perm[0], perm[k] = k, 0
+            # Permute all per-galaxy arrays computed so far
+            tau_mock     = tau_mock[perm]
+            x_gal        = x_gal[perm];  y_gal = y_gal[perm];  z_gal = z_gal[perm]
+            redshifts    = redshifts[perm]
+            flux_noise_mock = flux_noise_mock[perm]
+            # (cont_filled arrays are permuted later via _permute_S after _S is set)
+            print(f"  lae_first: swapped galaxy {k} (EW_eff={ew_eff[k]:.1f}Å) → index 0",
+                  flush=True)
+
     # Populate module-level state before forking
     _S.x_gal_mock     = x_gal
     _S.y_gal_mock     = y_gal
@@ -328,6 +383,10 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS) 
     _S.direct_matrix  = direct_matrix
     _S.noise_per_bin  = noise_per_bin
     _S.obs_flux       = obs_flux
+    _S.censored       = censored
+
+    if lae_first and len(lae_mask) > 0 and lae_mask[0] != 0:
+        _permute_S(perm)
 
     print(f"[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Running dynesty "
           f"(nlive={NLIVE}, dlogz={DLOGZ})...", flush=True)
@@ -402,19 +461,21 @@ def plot_grid(output_dir: str, n_gal_list=None) -> None:
         std_med  = np.zeros((len(ngals), NDIM))
         std_lo   = np.zeros((len(ngals), NDIM))
         std_hi   = np.zeros((len(ngals), NDIM))
-        bias_med = np.zeros((len(ngals), NDIM))
-        bias_lo  = np.zeros((len(ngals), NDIM))
-        bias_hi  = np.zeros((len(ngals), NDIM))
+        nbias_med = np.zeros((len(ngals), NDIM))
+        nbias_lo  = np.zeros((len(ngals), NDIM))
+        nbias_hi  = np.zeros((len(ngals), NDIM))
         for ki, ng in enumerate(ngals):
             seeds_here = by_ngal[ng]
             ss = np.array([s['post_std']                   for s in seeds_here])  # (n_s, 4)
             bs = np.array([s['post_median'] - s['true_mu'] for s in seeds_here])  # (n_s, 4)
-            std_med[ki]  = np.median(ss,  axis=0)
-            std_lo[ki]   = np.percentile(ss,  16, axis=0)
-            std_hi[ki]   = np.percentile(ss,  84, axis=0)
-            bias_med[ki] = np.median(bs,  axis=0)
-            bias_lo[ki]  = np.percentile(bs,  16, axis=0)
-            bias_hi[ki]  = np.percentile(bs,  84, axis=0)
+            # Normalised bias: per-seed bias / per-seed std
+            nbs = bs / np.where(ss > 0, ss, np.nan)                               # (n_s, 4)
+            std_med[ki]   = np.median(ss,   axis=0)
+            std_lo[ki]    = np.percentile(ss,   16, axis=0)
+            std_hi[ki]    = np.percentile(ss,   84, axis=0)
+            nbias_med[ki] = np.nanmedian(nbs,   axis=0)
+            nbias_lo[ki]  = np.nanpercentile(nbs,  16, axis=0)
+            nbias_hi[ki]  = np.nanpercentile(nbs,  84, axis=0)
 
         label = f'{noise:.0e}'
         for pi in range(NDIM):
@@ -424,18 +485,20 @@ def plot_grid(output_dir: str, n_gal_list=None) -> None:
                              marker='o', ms=4, label=label)
             axes[0, pi].fill_between(ngals, std_lo[:, pi], std_hi[:, pi],
                                      color=c, alpha=0.2)
-            # signed bias
-            axes[1, pi].plot(ngals, bias_med[:, pi], color=c, lw=1.5,
+            # normalised bias
+            axes[1, pi].plot(ngals, nbias_med[:, pi], color=c, lw=1.5,
                              marker='o', ms=4, label=label)
-            axes[1, pi].fill_between(ngals, bias_lo[:, pi], bias_hi[:, pi],
+            axes[1, pi].fill_between(ngals, nbias_lo[:, pi], nbias_hi[:, pi],
                                      color=c, alpha=0.2)
 
     for pi, pname in enumerate(PARAM_NAMES):
         axes[0, pi].set_title(pname)
         axes[0, pi].set_ylabel('Posterior std  (median ± 68% CI over seeds)')
-        axes[1, pi].set_ylabel('Median − truth  (± 68% CI over seeds)')
+        axes[1, pi].set_ylabel('(Median − truth) / std  (± 68% CI over seeds)')
         axes[1, pi].set_xlabel('N galaxies')
-        axes[1, pi].axhline(0, color='k', lw=0.8, ls='--')   # zero-bias reference
+        axes[1, pi].axhline( 0, color='k',    lw=0.8, ls='--')
+        axes[1, pi].axhline( 1, color='gray', lw=0.7, ls=':')
+        axes[1, pi].axhline(-1, color='gray', lw=0.7, ls=':')
         axes[0, pi].set_ylim(bottom=0)
 
     axes[0, -1].legend(title='Noise (flux)', fontsize=8, bbox_to_anchor=(1.02, 1))
@@ -473,6 +536,10 @@ if __name__ == '__main__':
                         help='Only include these N values in the summary plot.')
     parser.add_argument('--output_dir', type=str,   default='prod_results')
     parser.add_argument('--n_workers',  type=int,   default=N_WORKERS)
+    parser.add_argument('--censored',   action='store_true',
+                        help='Non-detected galaxies use censored (upper-limit) likelihood.')
+    parser.add_argument('--lae_first',  action='store_true',
+                        help='Condition mock on first galaxy having EW_eff > 25Å.')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -496,12 +563,14 @@ if __name__ == '__main__':
             parser.error('Specify --n_gal + --noise + --seed, --job_id, or --all')
 
         for n_gal, noise, seed in triples:
-            out_file = params_to_filename(n_gal, noise, seed, args.output_dir)
+            out_file = params_to_filename(n_gal, noise, seed, args.output_dir,
+                                          censored=args.censored, lae_first=args.lae_first)
             if os.path.exists(out_file):
                 print(f"[n_gal={n_gal}, noise={noise:.2e}] Already done, skipping.",
                       flush=True)
                 continue
-            result = run_single(n_gal, noise, seed, n_workers=args.n_workers)
+            result = run_single(n_gal, noise, seed, n_workers=args.n_workers,
+                                 censored=args.censored, lae_first=args.lae_first)
             np.savez(out_file, **result)
             print(f"Saved {out_file}", flush=True)
 

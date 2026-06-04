@@ -472,13 +472,7 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str,
         print(f"  State ready. Computing 4 slices × {n_pts} points...", flush=True)
 
         if not geometry_printed:
-            ew_suffix  = "_ewfixed"  if ew_fixed  else ""
-            cen_suffix = "_censored" if censored  else ""
-            lae_suffix = "_laefirst" if lae_first else ""
-            seed_tag = f"ngal{n_gal:03d}_seed{seed:02d}{ew_suffix}{cen_suffix}{lae_suffix}"
-            pred_truth = print_geometry(s)
-            if pred_truth is not None:
-                plot_ew_histogram(s, pred_truth, noise, outdir, seed_tag)
+            print_geometry(s)
             geometry_printed = True
 
         peaks = []
@@ -542,6 +536,11 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str,
         cen_note = " [censored]" if censored else ""
         print(f"\n  [LL breakdown at noise={worst_noise:.1e} where |r_peak - 10| = {worst_r_err:.2f}{cen_note}]")
         print_ll_breakdown(worst_state, worst_peaks, censored=censored)
+
+    # EW histogram using the lowest-noise state (last in loop) — 5σ threshold is meaningful here
+    seed_tag = f"ngal{n_gal:03d}_seed{seed:02d}{ew_suffix}{cen_suffix}{lae_suffix}"
+    pred_truth_low = log_likelihood(s, *TRUE_MU, return_predicted=True)[1]
+    plot_ew_histogram(s, pred_truth_low, noise, outdir, seed_tag)
 
     return all_peaks
 
