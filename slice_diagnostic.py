@@ -21,7 +21,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-from scipy.special import logsumexp, gammaln
+from scipy.special import logsumexp, gammaln, stdtr
 from astropy.cosmology import Planck18 as Cosmo
 from astropy import constants as const
 import astropy.units as u
@@ -45,7 +45,24 @@ wave_Lya     = 1215.67 * u.Angstrom
 NOISE_LEVELS = [5e-19, 2e-19, 1e-19, 5e-20, 2e-20]
 
 
-def build_state(n_gal: int, noise: float, seed: int, ew_fixed: bool = False):
+LAE_EW_THRESH = 25.0   # minimum EW (Å) for a galaxy to count as a LAE
+
+_LAE_PERM_FIELDS = [
+    'x_gal_mock', 'y_gal_mock', 'z_gal_mock', 'redshifts', 'R_H',
+    'tau_prec', 'z_up', 'red_up', 'z_lo', 'red_lo',
+    'z_wv', 'tau_wv_pref', 'I_z_end', 'I_red_up',
+    'base_cont', 'base_cont_outside', 'flux_outside',
+    'obs_flux', 'dist_from_center', 'inside_true',
+]
+
+
+def _permute_state(s, perm):
+    for f in _LAE_PERM_FIELDS:
+        setattr(s, f, getattr(s, f)[perm])
+    return s
+
+
+def build_state(n_gal: int, noise: float, seed: int, ew_fixed: bool = False, lae_first: bool = False):
     """Build the precomputed arrays for (n_gal, noise, seed). Returns a namespace."""
     import types
     np.random.seed(seed)
@@ -65,7 +82,7 @@ def build_state(n_gal: int, noise: float, seed: int, ew_fixed: bool = False):
         / np.trapz(one_J[0][i], wave_em.value)
         for i in range(n_gal)
     ])
-    _, la_e = p_EW(Muv_mock.flatten(), beta.flatten(), EW_fixed=ew_fixed)
+    ews, la_e = p_EW(Muv_mock.flatten(), beta.flatten(), EW_fixed=ew_fixed)
     la_e = la_e.reshape(np.shape(Muv_mock)) / area_factor
 
     continuum = (
@@ -180,10 +197,34 @@ def build_state(n_gal: int, noise: float, seed: int, ew_fixed: bool = False):
         noise_per_bin=noise_per_bin, obs_flux=flux_noise_mock,
         dist_from_center=dist_from_center, inside_true=inside_true,
     )
+
+    if lae_first:
+        # Observed EW = intrinsic EW × T_IGM, where T_IGM is the weighted IGM transmission.
+        # T_IGM[i] = trapz(j_s[i] * exp(-tau_mock[i]) * tau_cgm[i]) / trapz(j_s[i] * tau_cgm[i])
+        # A galaxy outside the bubble has large tau_mock → exp(-tau) ≈ 0 → EW_obs ≈ 0,
+        # regardless of intrinsic EW. So we must check the actual observed flux.
+        tau_cgm_arr = tau_CGM(Muv_mock, main_dir=MAIN_DIR)          # (n_gal, 100)
+        numer = np.trapz(j_s * np.exp(-tau_mock) * tau_cgm_arr, wave_em.value, axis=1)
+        denom = np.trapz(j_s * tau_cgm_arr, wave_em.value, axis=1)
+        ew_eff = ews * np.where(denom > 1e-30, numer / denom, 0.0)  # (n_gal,)
+        lae_mask = np.where(ew_eff > LAE_EW_THRESH)[0]
+        if len(lae_mask) == 0:
+            print(f"  WARNING: no galaxy with EW_eff > {LAE_EW_THRESH} Å (max={ew_eff.max():.1f}); "
+                  f"lae_first condition not satisfied for this seed.", flush=True)
+        else:
+            k = lae_mask[0]
+            if k != 0:
+                perm = np.arange(n_gal)
+                perm[0], perm[k] = k, 0
+                s = _permute_state(s, perm)
+
     return s
 
 
-def log_likelihood(s, xb, yb, zb, rb, per_galaxy=False, return_predicted=False):
+SNR_DET_THRESH = 1.0   # peak obs SNR threshold that separates detections from non-detections
+
+
+def log_likelihood(s, xb, yb, zb, rb, per_galaxy=False, return_predicted=False, censored=False):
     dx = s.x_gal_mock - xb
     dy = s.y_gal_mock - yb
     dz = s.z_gal_mock - zb
@@ -239,6 +280,21 @@ def log_likelihood(s, xb, yb, zb, rb, per_galaxy=False, return_predicted=False):
         + _log_norm
     )
     per_gal = log_p.sum(axis=1)   # shape (n_gal,)
+
+    if censored:
+        # Galaxies below the detection threshold contribute a censored (upper-limit) term
+        # instead of the full PDF: log P(obs < threshold | predicted) = Σ_b log CDF_t(z_b)
+        obs_peak_snr = np.max(np.abs(s.obs_flux) / s.noise_per_bin, axis=-1)  # (n_gal,)
+        detected = obs_peak_snr > SNR_DET_THRESH
+        if not np.all(detected):
+            det_threshold = SNR_DET_THRESH * s.noise_per_bin          # (N_BINS,)
+            z_cdf = (det_threshold - predicted) / s.noise_per_bin     # (n_gal, N_INSIDE_TAU, N_BINS)
+            log_cdf = np.log(stdtr(NU_STUDENT, z_cdf))                # (n_gal, N_INSIDE_TAU, N_BINS)
+            log_p_nondet = (
+                logsumexp(log_cdf.sum(axis=2), axis=1) - np.log(N_INSIDE_TAU)
+            )                                                          # (n_gal,)
+            per_gal = np.where(detected, per_gal, log_p_nondet)
+
     if return_predicted:
         return per_gal, predicted   # predicted: (n_gal, N_INSIDE_TAU, N_BINS)
     if per_galaxy:
@@ -289,14 +345,14 @@ def print_geometry(s):
               f"  sig_SNR={signal_snr[i]:.3f}{marker}")
 
 
-def print_ll_breakdown(s, peak_params):
+def print_ll_breakdown(s, peak_params, censored=False):
     """
     For the truth and the slice peak, print per-galaxy LL contributions and
     identify which galaxies drive the preference for peak_params over truth.
     """
     truth = TRUE_MU.copy().astype(float)
-    ll_truth = log_likelihood(s, *truth, per_galaxy=True)
-    ll_peak  = log_likelihood(s, *peak_params, per_galaxy=True)
+    ll_truth = log_likelihood(s, *truth, per_galaxy=True, censored=censored)
+    ll_peak  = log_likelihood(s, *peak_params, per_galaxy=True, censored=censored)
     delta    = ll_peak - ll_truth   # positive = peak is better for this galaxy
 
     inside_idx  = np.where(s.inside_true)[0]
@@ -325,7 +381,8 @@ def print_ll_breakdown(s, peak_params):
               f"  xyz=({s.x_gal_mock[g]:.1f},{s.y_gal_mock[g]:.1f},{s.z_gal_mock[g]:.1f})")
 
 
-def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str, ew_fixed: bool = False):
+def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str,
+               ew_fixed: bool = False, censored: bool = False, lae_first: bool = False):
     os.makedirs(outdir, exist_ok=True)
     r_grid = np.linspace(1, 20, n_pts)
     # Also scan each position param
@@ -346,7 +403,7 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str, ew_
     for ni, noise in enumerate(noise_levels):
         print(f"\nBuilding state: n_gal={n_gal}, noise={noise:.1e}, seed={seed}"
               f"{' [EW_fixed]' if ew_fixed else ''}...", flush=True)
-        s = build_state(n_gal, noise, seed, ew_fixed=ew_fixed)
+        s = build_state(n_gal, noise, seed, ew_fixed=ew_fixed, lae_first=lae_first)
         print(f"  State ready. Computing 4 slices × {n_pts} points...", flush=True)
 
         if not geometry_printed:
@@ -359,7 +416,7 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str, ew_
             for v in pgrid:
                 p = TRUE_MU.copy().astype(float)
                 p[pi] = v
-                lls.append(log_likelihood(s, *p))
+                lls.append(log_likelihood(s, *p, censored=censored))
             lls = np.array(lls)
             lls -= lls.max()   # normalise so peak is at 0
             ax.plot(pgrid, lls, lw=1.5, color=colors[ni], label=f'{noise:.0e}')
@@ -383,15 +440,21 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str, ew_
         ax.set_title(pname)
     axes[0].set_ylabel('Δ log L  (peak = 0)', fontsize=11)
     axes[-1].legend(title='noise', fontsize=7, loc='lower left')
-    ew_label = "EW=mean" if ew_fixed else "EW=sampled"
+    ew_label  = "EW=mean" if ew_fixed else "EW=sampled"
+    cen_label = ", censored" if censored else ""
+    lae_label = ", LAE-first" if lae_first else ""
     fig.suptitle(
         f"1-D likelihood slices through truth  |  n_gal={n_gal}, seed={seed}, "
-        f"N_INSIDE_TAU={N_INSIDE_TAU}, ν={NU_STUDENT}, {ew_label}",
+        f"N_INSIDE_TAU={N_INSIDE_TAU}, ν={NU_STUDENT}, {ew_label}{cen_label}{lae_label}",
         fontsize=11
     )
     fig.tight_layout()
-    ew_suffix = "_ewfixed" if ew_fixed else ""
-    fname = os.path.join(outdir, f'slices_ngal{n_gal:03d}_seed{seed:02d}{ew_suffix}.png')
+    ew_suffix  = "_ewfixed"  if ew_fixed  else ""
+    cen_suffix = "_censored" if censored  else ""
+    lae_suffix = "_laefirst" if lae_first else ""
+    fname = os.path.join(
+        outdir, f'slices_ngal{n_gal:03d}_seed{seed:02d}{ew_suffix}{cen_suffix}{lae_suffix}.png'
+    )
     fig.savefig(fname, dpi=150, bbox_inches='tight')
     print(f"\nSaved {fname}", flush=True)
 
@@ -405,8 +468,9 @@ def run_slices(n_gal: int, seed: int, noise_levels, n_pts: int, outdir: str, ew_
 
     # Per-galaxy LL breakdown at worst noise level
     if worst_r_err > 0.5 and worst_state is not None:
-        print(f"\n  [LL breakdown at noise={worst_noise:.1e} where |r_peak - 10| = {worst_r_err:.2f}]")
-        print_ll_breakdown(worst_state, worst_peaks)
+        cen_note = " [censored]" if censored else ""
+        print(f"\n  [LL breakdown at noise={worst_noise:.1e} where |r_peak - 10| = {worst_r_err:.2f}{cen_note}]")
+        print_ll_breakdown(worst_state, worst_peaks, censored=censored)
 
     return all_peaks
 
@@ -419,8 +483,11 @@ if __name__ == '__main__':
     parser.add_argument('--noise',  type=float, default=None,
                         help='single noise level; if omitted, runs all NOISE_LEVELS')
     parser.add_argument('--outdir',   type=str,            default='slice_results')
-    parser.add_argument('--ew_fixed', action='store_true', help='fix EW to mean (no random draw)')
+    parser.add_argument('--ew_fixed',  action='store_true', help='fix EW to mean (no random draw)')
+    parser.add_argument('--censored',  action='store_true', help='non-detected galaxies use CDF upper-limit term')
+    parser.add_argument('--lae_first', action='store_true', help='force galaxy 0 to have EW > 25 (LAE selection)')
     args = parser.parse_args()
 
     noise_levels = [args.noise] if args.noise is not None else NOISE_LEVELS
-    run_slices(args.n_gal, args.seed, noise_levels, args.n_pts, args.outdir, ew_fixed=args.ew_fixed)
+    run_slices(args.n_gal, args.seed, noise_levels, args.n_pts, args.outdir,
+               ew_fixed=args.ew_fixed, censored=args.censored, lae_first=args.lae_first)
