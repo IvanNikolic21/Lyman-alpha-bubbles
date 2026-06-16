@@ -513,32 +513,82 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS,
         base_cont_outside.reshape(n_gal * N_INSIDE_TAU, 100) @ direct_matrix
     ).reshape(n_gal, N_INSIDE_TAU, N_BINS)
 
-    # ── LAE-first: swap the first galaxy with the highest observed-EW one ────────
+    # ── LAE-first: ensure ≥1 LAE per bubble, swap best B1 LAE to index 0 ────────
     lae_mask = np.array([], dtype=int)
     perm     = np.arange(n_gal)
     if lae_first:
-        tau_cgm_arr = tau_CGM(Muv_mock, main_dir=MAIN_DIR)      # (n_gal, 100)
-        j_s_arr = np.array([cont_filled.j_s_full[i] for i in range(n_gal)])
-        j_s_mean = j_s_arr.mean(axis=1)                         # (n_gal, 100)
+        tau_cgm_arr = tau_CGM(Muv_mock, main_dir=MAIN_DIR)          # (n_gal, 100)
+        j_s_arr  = np.array([cont_filled.j_s_full[i] for i in range(n_gal)])
+        j_s_mean = j_s_arr.mean(axis=1)                              # (n_gal, 100)
         numer_ew = np.trapz(j_s_mean * np.exp(-tau_mock) * tau_cgm_arr, wave_em.value, axis=1)
-        denom_ew = np.trapz(j_s_mean * tau_cgm_arr,               wave_em.value, axis=1)
-        ew_eff   = ews * np.where(denom_ew > 1e-30, numer_ew / denom_ew, 0.0)
-        lae_mask = np.where(ew_eff > LAE_EW_THRESH)[0]
-        if len(lae_mask) == 0:
-            print(f"  WARNING: no LAE found (max EW_eff={ew_eff.max():.1f}Å); "
-                  f"lae_first not applied.", flush=True)
-        elif lae_mask[0] != 0:
-            k = lae_mask[0]
-            perm = np.arange(n_gal)
-            perm[0], perm[k] = k, 0
-            # Permute all per-galaxy arrays computed so far
-            tau_mock     = tau_mock[perm]
-            x_gal        = x_gal[perm];  y_gal = y_gal[perm];  z_gal = z_gal[perm]
-            redshifts    = redshifts[perm]
-            flux_noise_mock = flux_noise_mock[perm]
-            # (cont_filled arrays are permuted later via _permute_S after _S is set)
-            print(f"  lae_first: swapped galaxy {k} (EW_eff={ew_eff[k]:.1f}Å) → index 0",
-                  flush=True)
+        denom_ew = np.trapz(j_s_mean * tau_cgm_arr,                  wave_em.value, axis=1)
+        ratio_ew = np.where(denom_ew > 1e-30, numer_ew / denom_ew, 0.0)  # fixed per galaxy
+
+        if two_bub:
+            # Separate inside masks for each bubble
+            _x2, _y2, _z2, _r2 = two_bub_mu[4:]
+            in_b1 = ((x_gal - true_mu_1[0])**2 + (y_gal - true_mu_1[1])**2
+                     + (z_gal - true_mu_1[2])**2 < true_mu_1[3]**2)
+            in_b2 = ((x_gal - _x2)**2 + (y_gal - _y2)**2
+                     + (z_gal - _z2)**2 < _r2**2)
+
+            # Resample EW draw until both bubbles have ≥1 LAE (positions/tau fixed)
+            N_MAX_EW_ATTEMPTS = 30
+            for _attempt in range(N_MAX_EW_ATTEMPTS):
+                ew_eff  = ews * ratio_ew
+                lae_b1  = np.where(in_b1 & (ew_eff > LAE_EW_THRESH))[0]
+                lae_b2  = np.where(in_b2 & (ew_eff > LAE_EW_THRESH))[0]
+                if len(lae_b1) > 0 and len(lae_b2) > 0:
+                    break
+                # Redraw EWs only; update flux accordingly
+                ews, _la_e_new = p_EW(Muv_mock.flatten(), beta.flatten())
+                la_e      = _la_e_new.reshape(np.shape(Muv_mock)) / area_factor
+                _cont_new = (
+                    la_e[:, np.newaxis] * one_J[0][:n_gal] * np.exp(-tau_mock)
+                    * tau_cgm_arr
+                    / (4 * np.pi * Cosmo.luminosity_distance(7.5).to(u.cm).value ** 2)
+                )
+                _ff_new       = full_res_flux(_cont_new, 7.5)
+                _ff_new      += np.random.normal(0, noise, np.shape(_ff_new))
+                flux_noise_mock = perturb_flux(_ff_new, N_BINS)
+                obs_flux        = flux_noise_mock
+            else:
+                missing = ((['B1'] if len(lae_b1) == 0 else [])
+                           + (['B2'] if len(lae_b2) == 0 else []))
+                print(f"  WARNING: after {N_MAX_EW_ATTEMPTS} EW resamples, "
+                      f"still no LAE in {missing}. Proceeding anyway.", flush=True)
+
+            print(f"  lae_first (2-bub): B1 LAEs={len(lae_b1)}  B2 LAEs={len(lae_b2)}"
+                  + (f"  EW_b1_max={ew_eff[in_b1].max():.1f}Å"
+                     f"  EW_b2_max={ew_eff[in_b2].max():.1f}Å"
+                     if in_b1.any() and in_b2.any() else ""), flush=True)
+
+            # Swap best B1 LAE to index 0
+            lae_mask = lae_b1
+            if len(lae_mask) > 0 and lae_mask[0] != 0:
+                k = lae_mask[0]
+                perm[0], perm[k] = k, 0
+                tau_mock = tau_mock[perm];  x_gal = x_gal[perm]
+                y_gal = y_gal[perm];        z_gal = z_gal[perm]
+                redshifts = redshifts[perm];  flux_noise_mock = flux_noise_mock[perm]
+                print(f"  lae_first (2-bub): swapped B1 galaxy {k} "
+                      f"(EW_eff={ew_eff[k]:.1f}Å) → index 0", flush=True)
+
+        else:
+            ew_eff   = ews * ratio_ew
+            lae_mask = np.where(ew_eff > LAE_EW_THRESH)[0]
+            if len(lae_mask) == 0:
+                print(f"  WARNING: no LAE found (max EW_eff={ew_eff.max():.1f}Å); "
+                      f"lae_first not applied.", flush=True)
+            elif lae_mask[0] != 0:
+                k = lae_mask[0]
+                perm[0], perm[k] = k, 0
+                tau_mock     = tau_mock[perm]
+                x_gal        = x_gal[perm];  y_gal = y_gal[perm];  z_gal = z_gal[perm]
+                redshifts    = redshifts[perm]
+                flux_noise_mock = flux_noise_mock[perm]
+                print(f"  lae_first: swapped galaxy {k} (EW_eff={ew_eff[k]:.1f}Å) → index 0",
+                      flush=True)
 
     # Populate module-level state before forking
     _S.x_gal_mock     = x_gal
