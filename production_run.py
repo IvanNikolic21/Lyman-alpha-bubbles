@@ -79,8 +79,11 @@ def job_id_to_params(job_id: int, n_seeds: int, n_gal_list=None):
     return n_gal, noise, seed
 
 def params_to_filename(n_gal: int, noise: float, seed: int, output_dir: str,
-                       censored: bool = False, lae_first: bool = False) -> str:
-    suffix = ("_censored" if censored else "") + ("_laefirst" if lae_first else "")
+                       censored: bool = False, lae_first: bool = False,
+                       two_bub_mock: bool = False) -> str:
+    suffix = (("_censored" if censored else "")
+              + ("_laefirst" if lae_first else "")
+              + ("_2bubmock" if two_bub_mock else ""))
     return os.path.join(output_dir, f'prod_ngal{n_gal:03d}_noise{noise:.2e}_seed{seed:02d}{suffix}.npz')
 
 # ── Fixed settings ────────────────────────────────────────────────────────────
@@ -772,16 +775,20 @@ def _make_corner(samples, labels, truths, title, out_path):
 
 
 def plot_corners(output_dir: str, triples, censored: bool = False,
-                 lae_first: bool = False, bayes_factor: bool = False) -> None:
+                 lae_first: bool = False, bayes_factor: bool = False,
+                 two_bub_mock: bool = False) -> None:
     for n_gal, noise, seed in triples:
         tag = f'ngal{n_gal:03d}_noise{noise:.2e}_seed{seed:02d}'
-        suffix = ('_censored' if censored else '') + ('_laefirst' if lae_first else '')
+        suffix = (('_censored' if censored else '')
+                  + ('_laefirst' if lae_first else '')
+                  + ('_2bubmock' if two_bub_mock else ''))
 
         if bayes_factor:
             fname = os.path.join(output_dir, f'bf_{tag}{suffix}.npz')
         else:
             fname = params_to_filename(n_gal, noise, seed, output_dir,
-                                       censored=censored, lae_first=lae_first)
+                                       censored=censored, lae_first=lae_first,
+                                       two_bub_mock=two_bub_mock)
 
         if not os.path.exists(fname):
             print(f"Not found: {fname}")
@@ -865,7 +872,7 @@ if __name__ == '__main__':
         plot_corners(args.output_dir,
                      [(args.n_gal, args.noise, s) for s in seeds],
                      censored=args.censored, lae_first=args.lae_first,
-                     bayes_factor=True)
+                     bayes_factor=True, two_bub_mock=args.two_bub_mock)
 
     elif args.bayes_factor:
         if args.n_gal is None or args.noise is None or args.seed is None:
@@ -894,7 +901,8 @@ if __name__ == '__main__':
         seeds = args.corner_seeds or ([args.seed] if args.seed is not None else [0])
         plot_corners(args.output_dir,
                      [(args.n_gal, args.noise, s) for s in seeds],
-                     censored=args.censored, lae_first=args.lae_first)
+                     censored=args.censored, lae_first=args.lae_first,
+                     two_bub_mock=args.two_bub_mock)
 
     elif args.plot_only:
         plot_grid(args.output_dir, n_gal_list=args.plot_n_gal_list)
