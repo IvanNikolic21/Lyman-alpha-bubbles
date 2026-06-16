@@ -34,6 +34,7 @@ os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
+import time
 import argparse
 import glob
 import multiprocessing as mp
@@ -94,6 +95,9 @@ NLIVE        = 300
 DLOGZ        = 0.5
 MAIN_DIR     = '/groups/astro/ivannik/programs/Lyman-alpha-bubbles/'
 PARAM_NAMES  = ['x_bub', 'y_bub', 'z_bub', 'r_bub']
+NDIM_2BUB       = 8
+PARAM_NAMES_2BUB = ['x1_bub', 'y1_bub', 'z1_bub', 'r1_bub',
+                    'x2_bub', 'y2_bub', 'z2_bub', 'r2_bub']
 SNR_DET_THRESH = 1.0    # peak obs SNR below which a galaxy is treated as non-detected
 LAE_EW_THRESH  = 25.0   # minimum observed EW (Å) to qualify as a LAE
 
@@ -117,6 +121,102 @@ def _permute_S(perm):
 
 def _prior_transform(u):
     return PRIOR_LO + u * (PRIOR_HI - PRIOR_LO)
+
+
+def _prior_transform_2bub(u):
+    p = np.empty(8)
+    p[:4] = PRIOR_LO + u[:4] * (PRIOR_HI - PRIOR_LO)
+    p[4:] = PRIOR_LO + u[4:] * (PRIOR_HI - PRIOR_LO)
+    if p[3] < p[7]:          # enforce r1 >= r2 to break bubble-swap symmetry
+        p[3], p[7] = p[7], p[3]
+    return p
+
+
+def _log_likelihood_2bub(theta):
+    s = _S
+    x1, y1, z1, r1, x2, y2, z2, r2 = theta
+
+    dx1 = s.x_gal_mock - x1;  dy1 = s.y_gal_mock - y1;  dz1 = s.z_gal_mock - z1
+    dx2 = s.x_gal_mock - x2;  dy2 = s.y_gal_mock - y2;  dz2 = s.z_gal_mock - z2
+
+    in1 = dx1**2 + dy1**2 + dz1**2 < r1**2
+    in2 = dx2**2 + dy2**2 + dz2**2 < r2**2
+    inside = in1 | in2
+
+    # LOS distance from galaxy to near face; use np.maximum to avoid sqrt of negatives
+    dist1 = dz1 + np.sqrt(np.maximum(r1**2 - dx1**2 - dy1**2, 0.0))
+    dist2 = dz2 + np.sqrt(np.maximum(r2**2 - dx2**2 - dy2**2, 0.0))
+
+    # Near-face redshift per bubble; inf for galaxies not inside that bubble
+    z_end1 = np.where(in1, s.redshifts - dist1 / s.R_H, np.inf)
+    z_end2 = np.where(in2, s.redshifts - dist2 / s.R_H, np.inf)
+
+    # Galaxy inside multiple bubbles: take whichever near face is closer to observer
+    # (lower redshift → lower tau_IGM to observer)
+    z_end_bub_arr = np.minimum(z_end1, z_end2)
+
+    inside_gals = np.where(inside)[0]
+
+    if len(inside_gals) == 0:
+        continuum_all = s.base_cont_outside
+    else:
+        tau_post_in = calculate_taus_post_batched(
+            s.redshifts[inside_gals], z_end_bub_arr[inside_gals],
+            s.z_up[inside_gals].copy(), s.red_up[inside_gals],
+            s.z_lo[inside_gals].copy(), s.red_lo[inside_gals],
+            z_per_gal=s.z_wv[inside_gals],
+            tau_wv_pref_per_gal=s.tau_wv_pref[inside_gals],
+            I_z_end_per_gal=s.I_z_end[inside_gals],
+            I_red_up_all=s.I_red_up[inside_gals],
+        )
+        tau_now = s.tau_prec[inside_gals] + tau_post_in
+        bad = np.any(tau_now[:, :, 30:] - tau_now[:, :, 29:-1] > 0, axis=2)
+        if np.any(bad):
+            for _ii, g in enumerate(inside_gals):
+                if not np.any(bad[_ii]):
+                    continue
+                ratio_g = (1 + z_end_bub_arr[g]) / (1 + s.z_wv[g])
+                tau_now[_ii, bad[_ii]] = np.clip(
+                    s.tau_wv_pref[g] * ratio_g**1.5 * (I(ratio_g) - s.I_z_end[g]),
+                    0, np.inf,
+                )
+        tau_now[tau_now < 0] = np.inf
+        tau_now = np.nan_to_num(tau_now, nan=np.inf)
+        continuum_all = s.base_cont_outside.copy()
+        continuum_all[inside_gals] = s.base_cont[inside_gals] * np.exp(-tau_now)
+
+    predicted = s.flux_outside.copy()
+    if len(inside_gals) > 0:
+        flat_in = continuum_all[inside_gals].reshape(len(inside_gals) * N_INSIDE_TAU, 100)
+        predicted[inside_gals] = (flat_in @ s.direct_matrix).reshape(
+            len(inside_gals), N_INSIDE_TAU, N_BINS
+        )
+
+    np.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+    diffs     = s.obs_flux[:, np.newaxis, :] - predicted
+    _log_norm = (gammaln((NU_STUDENT + 1) / 2) - gammaln(NU_STUDENT / 2)
+                 - 0.5 * np.log(np.pi * NU_STUDENT) - np.log(s.noise_per_bin))
+    log_p = (
+        logsumexp(
+            -(NU_STUDENT + 1) / 2 * np.log1p((diffs / s.noise_per_bin) ** 2 / NU_STUDENT),
+            axis=1,
+        )
+        - np.log(N_INSIDE_TAU)
+        + _log_norm
+    )
+    per_gal = log_p.sum(axis=1)
+
+    if getattr(s, 'censored', False):
+        obs_peak_snr = np.max(np.abs(s.obs_flux) / s.noise_per_bin, axis=-1)
+        detected = obs_peak_snr > SNR_DET_THRESH
+        if not np.all(detected):
+            det_threshold = SNR_DET_THRESH * s.noise_per_bin
+            z_cdf = (det_threshold - predicted) / s.noise_per_bin
+            log_cdf = np.log(stdtr(NU_STUDENT, z_cdf))
+            log_p_nondet = logsumexp(log_cdf.sum(axis=2), axis=1) - np.log(N_INSIDE_TAU)
+            per_gal = np.where(detected, per_gal, log_p_nondet)
+
+    return float(per_gal.sum())
 
 
 def _log_likelihood(theta):
@@ -399,7 +499,6 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS,
 
     print(f"[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Running dynesty "
           f"(nlive={NLIVE}, dlogz={DLOGZ})...", flush=True)
-    import time
     t0 = time.perf_counter()
     with mp.get_context('fork').Pool(n_workers) as pool:
         sampler = dynesty.NestedSampler(
@@ -434,6 +533,53 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS,
         n_detected=n_detected,
         logz=results.logz[-1], logzerr=results.logzerr[-1],
         ncall=results.ncall.sum(), wall_time=wall_time,
+    )
+
+
+# ── Bayes factor run ──────────────────────────────────────────────────────────
+
+def run_bayes_factor(n_gal: int, noise: float, seed: int,
+                     n_workers: int = N_WORKERS,
+                     censored: bool = False, lae_first: bool = False) -> dict:
+    """Run M1 (1 bubble) and M2 (2 bubbles) on the same mock; return Bayes factor."""
+
+    # M1 — also populates _S which M2 will reuse
+    print(f"\n=== Bayes factor run: n_gal={n_gal}, noise={noise:.2e}, seed={seed} ===",
+          flush=True)
+    print("--- Model 1: single bubble ---", flush=True)
+    result_m1 = run_single(n_gal, noise, seed, n_workers=n_workers,
+                           censored=censored, lae_first=lae_first)
+
+    # M2 — _S already populated; fork pool inherits it
+    print("--- Model 2: two bubbles ---", flush=True)
+    t0 = time.perf_counter()
+    with mp.get_context('fork').Pool(n_workers) as pool:
+        sampler_m2 = dynesty.NestedSampler(
+            _log_likelihood_2bub, _prior_transform_2bub, ndim=NDIM_2BUB,
+            nlive=NLIVE, pool=pool, queue_size=n_workers,
+        )
+        sampler_m2.run_nested(print_progress=True, dlogz=DLOGZ)
+    wall_time_m2 = time.perf_counter() - t0
+
+    res2         = sampler_m2.results
+    weights_m2   = np.exp(res2.logwt - res2.logz[-1])
+    samples_m2   = resample_equal(res2.samples, weights_m2)
+    logz_2       = float(res2.logz[-1])
+    logzerr_2    = float(res2.logzerr[-1])
+    logz_1       = float(result_m1['logz'])
+    log_bf       = logz_2 - logz_1
+
+    print(f"\n  log Z(M1) = {logz_1:.2f} ± {float(result_m1['logzerr']):.2f}", flush=True)
+    print(f"  log Z(M2) = {logz_2:.2f} ± {logzerr_2:.2f}", flush=True)
+    print(f"  log BF(M2/M1) = {log_bf:.2f}  →  BF = {np.exp(log_bf):.2f}  "
+          f"({'M2 preferred' if log_bf > 0 else 'M1 preferred'})", flush=True)
+
+    return dict(
+        **result_m1,
+        logz_2=logz_2, logzerr_2=logzerr_2,
+        log_bf=log_bf,
+        posterior_samples_m2=samples_m2,
+        wall_time_m2=wall_time_m2,
     )
 
 
@@ -527,45 +673,67 @@ def plot_grid(output_dir: str, n_gal_list=None) -> None:
 
 # ── Corner plots ──────────────────────────────────────────────────────────────
 
-def plot_corners(output_dir: str, triples, censored: bool = False,
-                 lae_first: bool = False) -> None:
+def _make_corner(samples, labels, truths, title, out_path):
     try:
         import corner
     except ImportError:
         print("Install corner: pip install corner")
         return
+    fig = corner.corner(
+        samples, labels=labels, truths=truths,
+        truth_color='C1', show_titles=True, title_fmt='.2f',
+        title_kwargs={'fontsize': 9},
+        quantiles=[0.16, 0.5, 0.84],
+    )
+    fig.suptitle(title, y=1.01, fontsize=10)
+    fig.savefig(out_path, bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    print(f"Saved {out_path}")
 
+
+def plot_corners(output_dir: str, triples, censored: bool = False,
+                 lae_first: bool = False, bayes_factor: bool = False) -> None:
     for n_gal, noise, seed in triples:
-        fname = params_to_filename(n_gal, noise, seed, output_dir,
-                                   censored=censored, lae_first=lae_first)
+        tag = f'ngal{n_gal:03d}_noise{noise:.2e}_seed{seed:02d}'
+        suffix = ('_censored' if censored else '') + ('_laefirst' if lae_first else '')
+
+        if bayes_factor:
+            fname = os.path.join(output_dir, f'bf_{tag}{suffix}.npz')
+        else:
+            fname = params_to_filename(n_gal, noise, seed, output_dir,
+                                       censored=censored, lae_first=lae_first)
+
         if not os.path.exists(fname):
             print(f"Not found: {fname}")
             continue
-        d       = dict(np.load(fname, allow_pickle=True))
-        samples = d['posterior_samples']   # (N_samples, 4)
-        truths  = d['true_mu']
-        median  = d['post_median']
-        std     = d['post_std']
-        n_det   = int(d.get('n_detected', -1))
 
-        title_lines = [f'n_gal={n_gal}, noise={noise:.1e}, seed={seed}']
-        if n_det >= 0:
-            title_lines.append(f'detected: {n_det}/{n_gal}  '
-                                f'({100*n_det/n_gal:.0f}%)')
+        d     = dict(np.load(fname, allow_pickle=True))
+        n_det = int(d.get('n_detected', -1))
+        det_str = (f'  detected: {n_det}/{n_gal} ({100*n_det/n_gal:.0f}%)'
+                   if n_det >= 0 else '')
 
-        fig = corner.corner(
-            samples, labels=PARAM_NAMES, truths=truths,
-            truth_color='C1', show_titles=True, title_fmt='.2f',
-            title_kwargs={'fontsize': 9},
-            quantiles=[0.16, 0.5, 0.84],
+        # M1 corner
+        _make_corner(
+            samples   = d['posterior_samples'],
+            labels    = PARAM_NAMES,
+            truths    = d['true_mu'],
+            title     = f'M1 (1 bubble)  n_gal={n_gal}, noise={noise:.1e}, seed={seed}{det_str}',
+            out_path  = os.path.join(output_dir, f'corner_m1_{tag}{suffix}.png'),
         )
-        fig.suptitle('\n'.join(title_lines), y=1.01, fontsize=10)
 
-        tag = f'ngal{n_gal:03d}_noise{noise:.2e}_seed{seed:02d}'
-        out = os.path.join(output_dir, f'corner_{tag}.png')
-        fig.savefig(out, bbox_inches='tight', dpi=150)
-        plt.close(fig)
-        print(f"Saved {out}")
+        # M2 corner — only present in BF files
+        if 'posterior_samples_m2' in d:
+            truths_m2 = np.concatenate([d['true_mu'], np.full(4, np.nan)])
+            log_bf    = float(d['log_bf'])
+            _make_corner(
+                samples   = d['posterior_samples_m2'],
+                labels    = PARAM_NAMES_2BUB,
+                truths    = truths_m2,
+                title     = (f'M2 (2 bubbles)  n_gal={n_gal}, noise={noise:.1e}, seed={seed}{det_str}\n'
+                             f'log BF(M2/M1) = {log_bf:.2f}  →  BF = {np.exp(log_bf):.1f}'
+                             f'  ({"M2 preferred" if log_bf > 0 else "M1 preferred"})'),
+                out_path  = os.path.join(output_dir, f'corner_m2_{tag}{suffix}.png'),
+            )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -595,13 +763,44 @@ if __name__ == '__main__':
                         help='Condition mock on first galaxy having EW_eff > 25Å.')
     parser.add_argument('--corner',     action='store_true',
                         help='Make corner plots for --n_gal, --noise, --corner_seeds.')
+    parser.add_argument('--corner_bf',  action='store_true',
+                        help='Make M1+M2 corner plots from a BF run file.')
     parser.add_argument('--corner_seeds', type=int, nargs='+', default=None,
                         help='Seeds to plot corners for (defaults to --seed if set, else 0).')
+    parser.add_argument('--bayes_factor', action='store_true',
+                        help='Run M1 (1 bubble) + M2 (2 bubbles) on same mock; compute BF.')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    if args.corner:
+    if args.corner_bf:
+        if args.n_gal is None or args.noise is None:
+            parser.error('--corner_bf requires --n_gal and --noise')
+        seeds = args.corner_seeds or ([args.seed] if args.seed is not None else [0])
+        plot_corners(args.output_dir,
+                     [(args.n_gal, args.noise, s) for s in seeds],
+                     censored=args.censored, lae_first=args.lae_first,
+                     bayes_factor=True)
+
+    elif args.bayes_factor:
+        if args.n_gal is None or args.noise is None or args.seed is None:
+            parser.error('--bayes_factor requires --n_gal, --noise, and --seed')
+        out_file = os.path.join(
+            args.output_dir,
+            f'bf_ngal{args.n_gal:03d}_noise{args.noise:.2e}_seed{args.seed:02d}'
+            + ('_censored' if args.censored else '')
+            + ('_laefirst' if args.lae_first else '')
+            + '.npz'
+        )
+        result = run_bayes_factor(
+            args.n_gal, args.noise, args.seed,
+            n_workers=args.n_workers,
+            censored=args.censored, lae_first=args.lae_first,
+        )
+        np.savez(out_file, **result)
+        print(f"Saved {out_file}", flush=True)
+
+    elif args.corner:
         if args.n_gal is None or args.noise is None:
             parser.error('--corner requires --n_gal and --noise')
         seeds = args.corner_seeds or ([args.seed] if args.seed is not None else [0])
