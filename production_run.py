@@ -51,7 +51,9 @@ import astropy.units as u
 
 from venv.speed_up import get_content, calculate_taus_post_batched
 from venv.galaxy_prop import get_mock_data, get_js, tau_CGM, p_EW
-from venv.helpers import full_res_flux, perturb_flux, z_at_proper_distance, I
+from venv.helpers import full_res_flux, perturb_flux, z_at_proper_distance, I, \
+    comoving_distance_from_source_Mpc
+from venv.igm_prop import calculate_taus_i, tau_wv as _tau_wv_igm
 
 # ── Grid definition ───────────────────────────────────────────────────────────
 N_GAL_GRID  = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70]
@@ -95,6 +97,7 @@ NLIVE        = 300
 DLOGZ        = 0.5
 MAIN_DIR     = '/groups/astro/ivannik/programs/Lyman-alpha-bubbles/'
 PARAM_NAMES  = ['x_bub', 'y_bub', 'z_bub', 'r_bub']
+TRUE_2BUB_MU = np.array([-5.0, -5.0, -2.0, 7.0, 4.0, 5.0, 6.0, 5.0])
 NDIM_2BUB       = 8
 PARAM_NAMES_2BUB = ['x1_bub', 'y1_bub', 'z1_bub', 'r1_bub',
                     'x2_bub', 'y2_bub', 'z2_bub', 'r2_bub']
@@ -293,24 +296,96 @@ def _log_likelihood(theta):
     return float(per_gal.sum())
 
 
+# ── Two-bubble mock helpers ───────────────────────────────────────────────────
+
+def _tau_for_gal_in_bub(xs_i, ys_i, zs_i, red_s,
+                         xb, yb, zb, rb,
+                         x_b_bg, y_b_bg, z_b_bg, r_bubs_bg):
+    """Return (tau_arr (100,), z_end_bub) for galaxy i inside bubble (xb,yb,zb,rb)."""
+    dist_i = zs_i - zb + np.sqrt(rb**2 - (xs_i - xb)**2 - (ys_i - yb)**2)
+    z_end  = z_at_proper_distance(dist_i / (1 + red_s) * u.Mpc, red_s)
+    tau    = calculate_taus_i(x_b_bg, y_b_bg, z_b_bg, r_bubs_bg,
+                               red_s, z_end, n_iter=1,
+                               x_pos=xs_i, y_pos=ys_i, dist=dist_i)
+    if np.any(tau[:, 30:] - tau[:, 29:-1] > 0.0):
+        inds_rm = np.where(np.any(tau[:, 30:] - tau[:, 29:-1] > 0.0, axis=1))[0]
+        for idx in inds_rm:
+            shift_sm = np.random.normal(0.0, 0.1)
+            dc = comoving_distance_from_source_Mpc(red_s, z_end)
+            tau[idx] = np.clip(
+                _tau_wv_igm(wave_em, dist=np.abs(dc), zs=red_s, z_end=5.3, nf=0.65) + shift_sm,
+                0, np.inf,
+            )
+    return np.nan_to_num(tau[0], np.inf), z_end
+
+
+def _apply_second_bubble_tau(xs, ys, zs, redshifts, tau_mock,
+                              xb1, yb1, zb1, rb1,
+                              xb2, yb2, zb2, rb2,
+                              x_b_bg, y_b_bg, z_b_bg, r_bubs_bg):
+    """Return tau_mock updated for galaxies that benefit from bubble 2."""
+    tau_out = tau_mock.copy()
+    for i in range(len(xs)):
+        in2 = (xs[i]-xb2)**2 + (ys[i]-yb2)**2 + (zs[i]-zb2)**2 < rb2**2
+        if not in2:
+            continue
+        tau2, z_end2 = _tau_for_gal_in_bub(xs[i], ys[i], zs[i], redshifts[i],
+                                             xb2, yb2, zb2, rb2,
+                                             x_b_bg, y_b_bg, z_b_bg, r_bubs_bg)
+        in1 = (xs[i]-xb1)**2 + (ys[i]-yb1)**2 + (zs[i]-zb1)**2 < rb1**2
+        if not in1:
+            tau_out[i] = tau2
+        else:
+            dist1  = zs[i] - zb1 + np.sqrt(rb1**2 - (xs[i]-xb1)**2 - (ys[i]-yb1)**2)
+            z_end1 = z_at_proper_distance(dist1 / (1 + redshifts[i]) * u.Mpc, redshifts[i])
+            if z_end2 < z_end1:
+                tau_out[i] = tau2
+    return tau_out
+
+
 # ── Single run ────────────────────────────────────────────────────────────────
 
 def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS,
-               censored: bool = False, lae_first: bool = False) -> dict:
-    """Run inference for one (n_gal, noise, seed) combination. Returns result dict."""
+               censored: bool = False, lae_first: bool = False,
+               two_bub_mu: np.ndarray = None) -> dict:
+    """Run inference for one (n_gal, noise, seed) combination. Returns result dict.
+
+    two_bub_mu : array of shape (8,) = [x1,y1,z1,r1, x2,y2,z2,r2], optional.
+        When given, the mock is generated from two bubbles instead of TRUE_MU.
+    """
     np.random.seed(seed)
-    print(f"\n[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Generating mock data...", flush=True)
+    two_bub = two_bub_mu is not None
+    true_mu_1 = two_bub_mu[:4] if two_bub else TRUE_MU
+
+    print(f"\n[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Generating mock data"
+          f"{' (2-bubble mock)' if two_bub else ''}...", flush=True)
 
     Muv_mock = np.ones(n_gal) * -18.5
     beta     = -2.0 * np.ones(n_gal)
 
-    tau_mock, x_gal, y_gal, z_gal, *_ = get_mock_data(
-        n_gal=n_gal, z_start=7.5, r_bubble=10, dist=15,
+    tau_mock, x_gal, y_gal, z_gal, x_b_bg, y_b_bg, z_b_bg, r_bubs_bg = get_mock_data(
+        n_gal=n_gal, z_start=7.5,
+        r_bubble=float(true_mu_1[3]),
+        xb=float(true_mu_1[0]), yb=float(true_mu_1[1]), zb=float(true_mu_1[2]),
+        dist=15,
     )
     redshifts = np.array([
         z_at_proper_distance(-z_gal[i] / (1 + 7.5) * u.Mpc, 7.5)
         for i in range(n_gal)
     ])
+
+    if two_bub:
+        x2, y2, z2, r2 = two_bub_mu[4:]
+        tau_mock = _apply_second_bubble_tau(
+            x_gal, y_gal, z_gal, redshifts, tau_mock,
+            *true_mu_1, x2, y2, z2, r2,
+            x_b_bg, y_b_bg, z_b_bg, r_bubs_bg,
+        )
+        n_in1 = int(((x_gal-true_mu_1[0])**2 + (y_gal-true_mu_1[1])**2
+                     + (z_gal-true_mu_1[2])**2 < true_mu_1[3]**2).sum())
+        n_in2 = int(((x_gal-x2)**2 + (y_gal-y2)**2
+                     + (z_gal-z2)**2 < r2**2).sum())
+        print(f"  Inside bub1: {n_in1}/{n_gal}   Inside bub2: {n_in2}/{n_gal}", flush=True)
 
     one_J = get_js(z=7.5, muv=Muv_mock, n_iter=n_gal)
     area_factor = np.array([
@@ -330,13 +405,13 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS,
     full_flux += np.random.normal(0, noise, np.shape(full_flux))
     flux_noise_mock = perturb_flux(full_flux, N_BINS)   # (n_gal, N_BINS)
 
-    # ── Geometry diagnostics — helps identify systematic y/z asymmetry ───────
-    _inside = x_gal**2 + y_gal**2 + z_gal**2 < TRUE_MU[3]**2
+    # ── Geometry diagnostics ─────────────────────────────────────────────────
+    _inside = ((x_gal - true_mu_1[0])**2 + (y_gal - true_mu_1[1])**2
+               + (z_gal - true_mu_1[2])**2 < true_mu_1[3]**2)
     print(f"  x: mean={x_gal.mean():+.2f}  y: mean={y_gal.mean():+.2f}  "
-          f"z: mean={z_gal.mean():+.2f}  (should be ~0 if uniform)", flush=True)
-    print(f"  Inside true bubble: {_inside.sum()}/{n_gal}  "
-          f"inside_z_mean={z_gal[_inside].mean():+.2f}" if _inside.any() else
-          f"  Inside true bubble: 0/{n_gal}", flush=True)
+          f"z: mean={z_gal.mean():+.2f}", flush=True)
+    print(f"  Inside bub1: {_inside.sum()}/{n_gal}"
+          + (f"  z_mean={z_gal[_inside].mean():+.2f}" if _inside.any() else ""), flush=True)
     print(f"  tau_mock: min={tau_mock.min():.3f}  "
           f"mean={tau_mock.mean():.3f}  max={tau_mock.max():.3f}", flush=True)
 
@@ -529,7 +604,7 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS,
         posterior_samples=equal_samples,
         post_mean=post_mean, post_median=post_median, post_std=post_std,
         post_p16=post_p16, post_p84=post_p84,
-        true_mu=TRUE_MU,
+        true_mu=true_mu_1,
         n_detected=n_detected,
         logz=results.logz[-1], logzerr=results.logzerr[-1],
         ncall=results.ncall.sum(), wall_time=wall_time,
@@ -540,15 +615,19 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS,
 
 def run_bayes_factor(n_gal: int, noise: float, seed: int,
                      n_workers: int = N_WORKERS,
-                     censored: bool = False, lae_first: bool = False) -> dict:
-    """Run M1 (1 bubble) and M2 (2 bubbles) on the same mock; return Bayes factor."""
+                     censored: bool = False, lae_first: bool = False,
+                     two_bub_mu: np.ndarray = None) -> dict:
+    """Run M1 (1 bubble) and M2 (2 bubbles) on the same mock; return Bayes factor.
 
+    two_bub_mu : optional (8,) array — when given, mock is generated from two bubbles.
+    """
     # M1 — also populates _S which M2 will reuse
-    print(f"\n=== Bayes factor run: n_gal={n_gal}, noise={noise:.2e}, seed={seed} ===",
-          flush=True)
+    print(f"\n=== Bayes factor run: n_gal={n_gal}, noise={noise:.2e}, seed={seed}"
+          f"{' [2-bub mock]' if two_bub_mu is not None else ''} ===", flush=True)
     print("--- Model 1: single bubble ---", flush=True)
     result_m1 = run_single(n_gal, noise, seed, n_workers=n_workers,
-                           censored=censored, lae_first=lae_first)
+                           censored=censored, lae_first=lae_first,
+                           two_bub_mu=two_bub_mu)
 
     # M2 — _S already populated; fork pool inherits it
     print("--- Model 2: two bubbles ---", flush=True)
@@ -579,6 +658,7 @@ def run_bayes_factor(n_gal: int, noise: float, seed: int,
         logz_2=logz_2, logzerr_2=logzerr_2,
         log_bf=log_bf,
         posterior_samples_m2=samples_m2,
+        true_mu_m2=two_bub_mu if two_bub_mu is not None else np.full(8, np.nan),
         wall_time_m2=wall_time_m2,
     )
 
@@ -723,7 +803,9 @@ def plot_corners(output_dir: str, triples, censored: bool = False,
 
         # M2 corner — only present in BF files
         if 'posterior_samples_m2' in d:
-            truths_m2 = np.concatenate([d['true_mu'], np.full(4, np.nan)])
+            stored = d.get('true_mu_m2', np.full(8, np.nan))
+            truths_m2 = stored if not np.all(np.isnan(stored)) \
+                else np.concatenate([d['true_mu'], np.full(4, np.nan)])
             log_bf    = float(d['log_bf'])
             _make_corner(
                 samples   = d['posterior_samples_m2'],
@@ -769,6 +851,9 @@ if __name__ == '__main__':
                         help='Seeds to plot corners for (defaults to --seed if set, else 0).')
     parser.add_argument('--bayes_factor', action='store_true',
                         help='Run M1 (1 bubble) + M2 (2 bubbles) on same mock; compute BF.')
+    parser.add_argument('--two_bub_mock', action='store_true',
+                        help='Generate mock from two bubbles (TRUE_2BUB_MU). '
+                             'Use with --bayes_factor or alone.')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -785,17 +870,20 @@ if __name__ == '__main__':
     elif args.bayes_factor:
         if args.n_gal is None or args.noise is None or args.seed is None:
             parser.error('--bayes_factor requires --n_gal, --noise, and --seed')
+        two_bub_mu = TRUE_2BUB_MU if args.two_bub_mock else None
         out_file = os.path.join(
             args.output_dir,
             f'bf_ngal{args.n_gal:03d}_noise{args.noise:.2e}_seed{args.seed:02d}'
             + ('_censored' if args.censored else '')
             + ('_laefirst' if args.lae_first else '')
+            + ('_2bubmock' if args.two_bub_mock else '')
             + '.npz'
         )
         result = run_bayes_factor(
             args.n_gal, args.noise, args.seed,
             n_workers=args.n_workers,
             censored=args.censored, lae_first=args.lae_first,
+            two_bub_mu=two_bub_mu,
         )
         np.savez(out_file, **result)
         print(f"Saved {out_file}", flush=True)
