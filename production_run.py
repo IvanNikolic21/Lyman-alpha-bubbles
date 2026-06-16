@@ -388,6 +388,15 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS,
     if lae_first and len(lae_mask) > 0 and lae_mask[0] != 0:
         _permute_S(perm)
 
+    # Non-detection diagnostic — fixed property of the mock, not theta-dependent
+    _peak_snr  = np.max(np.abs(_S.obs_flux) / _S.noise_per_bin, axis=1)
+    _detected  = _peak_snr > SNR_DET_THRESH
+    n_detected = int(_detected.sum())
+    print(f"  Detection status (peak SNR > {SNR_DET_THRESH}): "
+          f"{n_detected}/{n_gal} detected, {n_gal - n_detected} non-detected "
+          f"({'censoring active' if censored else 'censoring OFF — all treated as detected'})",
+          flush=True)
+
     print(f"[n_gal={n_gal}, noise={noise:.2e}, seed={seed}] Running dynesty "
           f"(nlive={NLIVE}, dlogz={DLOGZ})...", flush=True)
     import time
@@ -422,6 +431,7 @@ def run_single(n_gal: int, noise: float, seed: int, n_workers: int = N_WORKERS,
         post_mean=post_mean, post_median=post_median, post_std=post_std,
         post_p16=post_p16, post_p84=post_p84,
         true_mu=TRUE_MU,
+        n_detected=n_detected,
         logz=results.logz[-1], logzerr=results.logzerr[-1],
         ncall=results.ncall.sum(), wall_time=wall_time,
     )
@@ -515,6 +525,49 @@ def plot_grid(output_dir: str, n_gal_list=None) -> None:
     print(f"Saved {out_path}", flush=True)
 
 
+# ── Corner plots ──────────────────────────────────────────────────────────────
+
+def plot_corners(output_dir: str, triples, censored: bool = False,
+                 lae_first: bool = False) -> None:
+    try:
+        import corner
+    except ImportError:
+        print("Install corner: pip install corner")
+        return
+
+    for n_gal, noise, seed in triples:
+        fname = params_to_filename(n_gal, noise, seed, output_dir,
+                                   censored=censored, lae_first=lae_first)
+        if not os.path.exists(fname):
+            print(f"Not found: {fname}")
+            continue
+        d       = dict(np.load(fname, allow_pickle=True))
+        samples = d['posterior_samples']   # (N_samples, 4)
+        truths  = d['true_mu']
+        median  = d['post_median']
+        std     = d['post_std']
+        n_det   = int(d.get('n_detected', -1))
+
+        title_lines = [f'n_gal={n_gal}, noise={noise:.1e}, seed={seed}']
+        if n_det >= 0:
+            title_lines.append(f'detected: {n_det}/{n_gal}  '
+                                f'({100*n_det/n_gal:.0f}%)')
+
+        fig = corner.corner(
+            samples, labels=PARAM_NAMES, truths=truths,
+            truth_color='C1', show_titles=True, title_fmt='.2f',
+            title_kwargs={'fontsize': 9},
+            quantiles=[0.16, 0.5, 0.84],
+        )
+        fig.suptitle('\n'.join(title_lines), y=1.01, fontsize=10)
+
+        tag = f'ngal{n_gal:03d}_noise{noise:.2e}_seed{seed:02d}'
+        out = os.path.join(output_dir, f'corner_{tag}.png')
+        fig.savefig(out, bbox_inches='tight', dpi=150)
+        plt.close(fig)
+        print(f"Saved {out}")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
@@ -540,11 +593,23 @@ if __name__ == '__main__':
                         help='Non-detected galaxies use censored (upper-limit) likelihood.')
     parser.add_argument('--lae_first',  action='store_true',
                         help='Condition mock on first galaxy having EW_eff > 25Å.')
+    parser.add_argument('--corner',     action='store_true',
+                        help='Make corner plots for --n_gal, --noise, --corner_seeds.')
+    parser.add_argument('--corner_seeds', type=int, nargs='+', default=None,
+                        help='Seeds to plot corners for (defaults to --seed if set, else 0).')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    if args.plot_only:
+    if args.corner:
+        if args.n_gal is None or args.noise is None:
+            parser.error('--corner requires --n_gal and --noise')
+        seeds = args.corner_seeds or ([args.seed] if args.seed is not None else [0])
+        plot_corners(args.output_dir,
+                     [(args.n_gal, args.noise, s) for s in seeds],
+                     censored=args.censored, lae_first=args.lae_first)
+
+    elif args.plot_only:
         plot_grid(args.output_dir, n_gal_list=args.plot_n_gal_list)
 
     else:
