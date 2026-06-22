@@ -95,11 +95,44 @@ def radec_to_comoving(ra, dec, redshift):
     y = d_c * np.radians(dec - dec0)
     z = d_c - d_c0
 
-    x = x - x.mean()
-    y = y - y.mean()
-    z = z - z.mean()
+    x_mean = x.mean()
+    y_mean = y.mean()
+    z_mean = z.mean()
+    x = x - x_mean
+    y = y - y_mean
+    z = z - z_mean
 
-    return x, y, z, ra0, dec0, z0
+    return x, y, z, ra0, dec0, z0, x_mean, y_mean, z_mean
+
+
+def comoving_to_radec(x, y, z, ra0, dec0, z0, x_mean=0.0, y_mean=0.0, z_mean=0.0):
+    """Inverse of `radec_to_comoving`: centered comoving Mpc -> (RA, Dec, redshift).
+
+    For a point (or array of points) in the same centered frame `radec_to_comoving`
+    produces (e.g. a fitted bubble center, or points on its surface for plotting).
+    `x_mean, y_mean, z_mean` are the centering offsets `radec_to_comoving` returned
+    for the galaxy sample that frame was built from -- pass 0 (default) only if
+    those weren't kept and the sample is tight enough that the approximation is
+    acceptable for a quick plot.
+    """
+    from astropy.cosmology import z_at_value
+
+    x = np.atleast_1d(np.asarray(x, dtype=float))
+    y = np.atleast_1d(np.asarray(y, dtype=float))
+    z = np.atleast_1d(np.asarray(z, dtype=float))
+
+    d_c0 = Cosmo.comoving_distance(z0).to(u.Mpc).value
+    d_c_target = (z + z_mean) + d_c0
+
+    redshift = np.array([
+        z_at_value(Cosmo.comoving_distance, d_c_i * u.Mpc)
+        for d_c_i in d_c_target
+    ])
+
+    ra  = ra0 + np.degrees((x + x_mean) / (d_c_target * np.cos(np.radians(dec0))))
+    dec = dec0 + np.degrees((y + y_mean) / d_c_target)
+
+    return ra, dec, redshift
 
 
 def data_driven_priors(x, y, z, pad_factor: float = 1.3, r_min: float = 0.5):

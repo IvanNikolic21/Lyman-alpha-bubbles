@@ -146,7 +146,7 @@ def build_state(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
     redshifts = cat.redshift[in_window]
     beta      = np.full(n_gal, -2.0)
 
-    x_gal, y_gal, z_gal, ra0, dec0, z0 = radec_to_comoving(
+    x_gal, y_gal, z_gal, ra0, dec0, z0, x_mean, y_mean, z_mean = radec_to_comoving(
         cat.ra[in_window], cat.dec[in_window], redshifts
     )
     prior_lo, prior_hi = data_driven_priors(x_gal, y_gal, z_gal)
@@ -251,6 +251,7 @@ def build_state(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
 
     return dict(
         n_gal=n_gal, ra0=ra0, dec0=dec0, z0=z0,
+        x_mean=x_mean, y_mean=y_mean, z_mean=z_mean,
         prior_lo=prior_lo, prior_hi=prior_hi,
         x_gal=x_gal, y_gal=y_gal, z_gal=z_gal, redshifts=redshifts,
         ew_obs=ew_obs, ew_err=ew_err, is_upper_limit=is_ul,
@@ -282,17 +283,18 @@ def run(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
     post_std    = equal_samples.std(axis=0)
     post_p16    = np.percentile(equal_samples, 16, axis=0)
     post_p84    = np.percentile(equal_samples, 84, axis=0)
+    post_map    = results.samples[np.argmax(results.logl)]   # max-likelihood point among raw nested samples
 
     print(f"[run] Done in {wall_time:.1f}s", flush=True)
     for _pi, _pn in enumerate(PARAM_NAMES):
-        print(f"  {_pn:6s}  median={post_median[_pi]:.3f}  std={post_std[_pi]:.3f}  "
-              f"[{post_p16[_pi]:.2f}, {post_p84[_pi]:.2f}]", flush=True)
+        print(f"  {_pn:6s}  median={post_median[_pi]:.3f}  map={post_map[_pi]:.3f}  "
+              f"std={post_std[_pi]:.3f}  [{post_p16[_pi]:.2f}, {post_p84[_pi]:.2f}]", flush=True)
 
     return dict(
         **meta,
         posterior_samples=equal_samples,
         post_mean=post_mean, post_median=post_median, post_std=post_std,
-        post_p16=post_p16, post_p84=post_p84,
+        post_p16=post_p16, post_p84=post_p84, post_map=post_map,
         logz=results.logz[-1], logzerr=results.logzerr[-1],
         ncall=results.ncall.sum(), wall_time=wall_time,
     )
