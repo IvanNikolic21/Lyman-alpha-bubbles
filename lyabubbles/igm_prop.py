@@ -11,7 +11,7 @@ from astropy.cosmology import z_at_value
 from astropy.cosmology import Planck18 as Cosmo
 from astropy import constants as const
 
-from venv.helpers import optical_depth, I, z_at_proper_distance
+from lyabubbles.helpers import optical_depth, I, z_at_proper_distance
 
 wave_em = np.linspace(1214, 1225., 100) * u.Angstrom
 wave_Lya = 1215.67 * u.Angstrom
@@ -759,8 +759,8 @@ def get_xH(
     :return:
     """
 
-    xHs_all = np.load(main_dir + '/venv/data/global_xHs.npy')
-    node_r = np.load(main_dir + '/venv/data/node_r.npy')
+    xHs_all = np.load(main_dir + '/lyabubbles/data/global_xHs.npy')
+    node_r = np.load(main_dir + '/lyabubbles/data/node_r.npy')
     xHs = []
     for x in xHs_all:
         xHs.append(np.interp(z, np.flip(node_r), np.flip(x)))

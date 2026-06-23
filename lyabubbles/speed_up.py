@@ -1,11 +1,11 @@
 import numpy as np
-from venv.galaxy_prop import get_js, p_EW, L_intr_AH22
-from venv.igm_prop import get_xH, get_bubbles
+from lyabubbles.galaxy_prop import get_js, p_EW, L_intr_AH22
+from lyabubbles.igm_prop import get_xH, get_bubbles
 from astropy import units as u
 from astropy import constants as const
-from venv.helpers import z_at_proper_distance, I, comoving_distance_from_source_Mpc
-from venv.igm_prop import tau_wv
-from venv.save import HdF5Saver
+from lyabubbles.helpers import z_at_proper_distance, I, comoving_distance_from_source_Mpc
+from lyabubbles.igm_prop import tau_wv
+from lyabubbles.save import HdF5Saver
 from joblib import Parallel, delayed
 import datetime
 from astropy.cosmology import Planck18 as Cosmo

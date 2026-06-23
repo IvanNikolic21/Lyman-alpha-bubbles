@@ -35,10 +35,10 @@ from astropy.cosmology import Planck18 as Cosmo
 from astropy import constants as const
 import astropy.units as u
 
-from venv.speed_up import get_content, calculate_taus_post_batched
-from venv.galaxy_prop import tau_CGM
-from venv.helpers import I
-from venv.real_data import load_catalog, radec_to_comoving, data_driven_priors
+from lyabubbles.speed_up import get_content, calculate_taus_post_batched
+from lyabubbles.galaxy_prop import tau_CGM
+from lyabubbles.helpers import I
+from lyabubbles.real_data import load_catalog, radec_to_comoving, data_driven_priors
 
 # ── Fixed settings ────────────────────────────────────────────────────────────
 NDIM         = 4
@@ -180,7 +180,7 @@ def build_state(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
     I_red_up    = I((1 + red_up_arr[:, :, np.newaxis]) * ooz[:, np.newaxis, :])
 
     tau_prec = np.array([cont_filled.tau_prec_full[i] for i in range(n_gal)])
-    # calculate_taus_prep (venv/speed_up.py) can hand back raw nan/-inf for
+    # calculate_taus_prep (lyabubbles/speed_up.py) can hand back raw nan/-inf for
     # pathological sightline geometries (seen with real galaxy parameters,
     # not exercised by the validated synthetic-mock regime) -- sanitize using
     # the same "bad tau -> +inf (fully absorbed)" convention already used
@@ -210,7 +210,7 @@ def build_state(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
     tau_total_outside = tau_prec + tau_out
 
     # ── Intrinsic EW per (galaxy, MC draw), recovered exactly from the
-    # luminosity draw already used to build `la_flux` (see venv.galaxy_prop.p_EW:
+    # luminosity draw already used to build `la_flux` (see lyabubbles.galaxy_prop.p_EW:
     # lum_alpha = EW * C_const * L_UV_mean, with C_const/L_UV_mean deterministic
     # functions of Muv/beta only) ──────────────────────────────────────────────
     c_const    = (2.47e15 / 1216.0) * (1500.0 / 1216.0) ** (-beta - 2)

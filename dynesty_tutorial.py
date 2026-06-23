@@ -27,14 +27,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import dynesty
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-from venv.speed_up import get_content, calculate_taus_post_batched
+from lyabubbles.speed_up import get_content, calculate_taus_post_batched
 from dynesty import plotting as dyplot
 from dynesty.utils import resample_equal
 from astropy.cosmology import Planck18 as Cosmo
 from astropy import constants as const
 import astropy.units as u
-from venv.galaxy_prop import get_muv, get_mock_data, get_js, tau_CGM, p_EW
-from venv.helpers import full_res_flux, perturb_flux, z_at_proper_distance, I
+from lyabubbles.galaxy_prop import get_muv, get_mock_data, get_js, tau_CGM, p_EW
+from lyabubbles.helpers import full_res_flux, perturb_flux, z_at_proper_distance, I
 from scipy.special import logsumexp, gammaln
 # ── Ground truth and fake data ────────────────────────────────────────────────
 

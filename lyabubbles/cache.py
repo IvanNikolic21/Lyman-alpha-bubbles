@@ -6,9 +6,9 @@
 # of the cached file
 import numpy as np
 import h5py
-from venv.save import HdF5LoadMocks
-from venv.helpers import z_at_proper_distance, full_res_flux, perturb_flux
-from venv.galaxy_prop import tau_CGM, p_EW
+from lyabubbles.save import HdF5LoadMocks
+from lyabubbles.helpers import z_at_proper_distance, full_res_flux, perturb_flux
+from lyabubbles.galaxy_prop import tau_CGM, p_EW
 from astropy import units as u
 from joblib import Parallel, delayed
 from scipy.stats import gaussian_kde

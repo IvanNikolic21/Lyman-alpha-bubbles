@@ -9,7 +9,7 @@ from astropy import constants as const
 
 import py21cmfast as p21c
 
-from venv.helpers import (
+from lyabubbles.helpers import (
     wave_to_dv,
     gaussian,
     optical_depth,
@@ -17,12 +17,12 @@ from venv.helpers import (
     hmf_integral_gtm,
     comoving_distance_from_source_Mpc
 )
-from venv.igm_prop import get_bubbles, calculate_taus
-from venv.igm_prop import calculate_taus_i, tau_wv
+from lyabubbles.igm_prop import get_bubbles, calculate_taus
+from lyabubbles.igm_prop import calculate_taus_i, tau_wv
 
-from venv.data.EndSta import get_ENDSTA_gals
+from lyabubbles.data.EndSta import get_ENDSTA_gals
 
-from venv.chmf import chmf as chmf_func
+from lyabubbles.chmf import chmf as chmf_func
 
 wave_em = np.linspace(1214, 1225., 100) * u.Angstrom
 dir_all = '/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/'
@@ -303,8 +303,8 @@ def calculate_EW_factor(
         equivalent width that, when multiplied with transmission, gives EW.
     """
 
-    Muv_thesan = np.load(main_dir + '/venv/data/Muv_THESAN.npy')
-    La_thesan = np.load(main_dir + '/venv/data/Lya_THESAN.npy')
+    Muv_thesan = np.load(main_dir + '/lyabubbles/data/Muv_THESAN.npy')
+    La_thesan = np.load(main_dir + '/lyabubbles/data/Lya_THESAN.npy')
     if hasattr(Muv, '__len__'):
          La_sample = np.zeros((len(Muv)))
          La_sample_mean = np.zeros((len(Muv)))
@@ -592,8 +592,8 @@ def tau_CGM(
 ):
     if main_dir not in _tau_cgm_data_cache:
         _tau_cgm_data_cache[main_dir] = (
-            np.load(main_dir + '/venv/data/Muv.npy'),
-            np.load(main_dir + '/venv/data/mh.npy'),
+            np.load(main_dir + '/lyabubbles/data/Muv.npy'),
+            np.load(main_dir + '/lyabubbles/data/mh.npy'),
         )
     Muvs, mh = _tau_cgm_data_cache[main_dir]
     mh_now = np.interp(Muv, np.flip(Muvs), np.flip(mh))
@@ -639,10 +639,10 @@ def calculate_number(
     R_eq = np.sqrt(x_dim**2 + y_dim**2 + z_dim**2)
 
     Muvs = np.load(
-        dir_all + 'venv/data/Muv.npy'
+        dir_all + 'lyabubbles/data/Muv.npy'
     )
     mh = np.load(
-        dir_all + 'venv/data/mh.npy'
+        dir_all + 'lyabubbles/data/mh.npy'
     )
 
     mh_cut = np.interp(muv_cut, np.flip(Muvs),np.flip( mh))
@@ -725,9 +725,9 @@ def L_intr_AH22(Muv):
     mass = csv_AH_22[:, 0]
     L_intr = csv_AH_22[:, 1]
     Muvs = np.load(
-        '/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/venv/data/Muv.npy')
+        '/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/lyabubbles/data/Muv.npy')
     mh = np.load(
-        '/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/venv/data/mh.npy')
+        '/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles/lyabubbles/data/mh.npy')
     mh_now = np.interp(Muv, np.flip(Muvs), np.flip(mh))
     mean_L = np.interp(np.log10(mh_now), np.log10(mass), L_intr)
 

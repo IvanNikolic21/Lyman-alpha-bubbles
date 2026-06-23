@@ -15,13 +15,13 @@ import itertools
 from joblib import Parallel, delayed
 from sklearn.neighbors import KernelDensity
 
-from venv.galaxy_prop import get_js, get_mock_data, p_EW, L_intr_AH22
-from venv.galaxy_prop import get_muv, tau_CGM, calculate_number
-from venv.igm_prop import tau_wv
-from venv.save import HdF5Saver, HdF5SaverAft, HdF5SaveMocks, HdF5LoadMocks
-from venv.helpers import z_at_proper_distance, full_res_flux, perturb_flux, comoving_distance_from_source_Mpc
-from venv.speed_up import get_content, calculate_taus_post
-from venv.cache import cache_main
+from lyabubbles.galaxy_prop import get_js, get_mock_data, p_EW, L_intr_AH22
+from lyabubbles.galaxy_prop import get_muv, tau_CGM, calculate_number
+from lyabubbles.igm_prop import tau_wv
+from lyabubbles.save import HdF5Saver, HdF5SaverAft, HdF5SaveMocks, HdF5LoadMocks
+from lyabubbles.helpers import z_at_proper_distance, full_res_flux, perturb_flux, comoving_distance_from_source_Mpc
+from lyabubbles.speed_up import get_content, calculate_taus_post
+from lyabubbles.cache import cache_main
 
 wave_em = np.linspace(1214, 1225., 100) * u.Angstrom
 wave_Lya = 1215.67 * u.Angstrom

@@ -49,11 +49,11 @@ from astropy.cosmology import Planck18 as Cosmo
 from astropy import constants as const
 import astropy.units as u
 
-from venv.speed_up import get_content, calculate_taus_post_batched
-from venv.galaxy_prop import get_mock_data, get_js, tau_CGM, p_EW
-from venv.helpers import full_res_flux, perturb_flux, z_at_proper_distance, I, \
+from lyabubbles.speed_up import get_content, calculate_taus_post_batched
+from lyabubbles.galaxy_prop import get_mock_data, get_js, tau_CGM, p_EW
+from lyabubbles.helpers import full_res_flux, perturb_flux, z_at_proper_distance, I, \
     comoving_distance_from_source_Mpc
-from venv.igm_prop import calculate_taus_i, tau_wv as _tau_wv_igm
+from lyabubbles.igm_prop import calculate_taus_i, tau_wv as _tau_wv_igm
 
 # ── Grid definition ───────────────────────────────────────────────────────────
 N_GAL_GRID  = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70]
