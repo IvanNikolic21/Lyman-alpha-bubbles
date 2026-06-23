@@ -135,11 +135,30 @@ def comoving_to_radec(x, y, z, ra0, dec0, z0, x_mean=0.0, y_mean=0.0, z_mean=0.0
     return ra, dec, redshift
 
 
-def data_driven_priors(x, y, z, pad_factor: float = 1.3, r_min: float = 0.5):
-    """Prior box for (x, y, z, r_bub) sized from the actual galaxy positions."""
-    half_extent = pad_factor * max(
-        np.abs(x).max(), np.abs(y).max(), np.abs(z).max()
-    )
-    prior_lo = np.array([-half_extent, -half_extent, -half_extent, r_min])
-    prior_hi = np.array([half_extent, half_extent, half_extent, half_extent])
+def data_driven_priors(x, y, z, pad_factor: float = 1.3, r_min: float = 0.5,
+                       r_max: float = None):
+    """Prior box for (x, y, z, r_bub) sized from the actual galaxy positions.
+
+    The (x, y, z) center bounds use each axis's own extent, not a shared
+    `max(...)` across axes -- a deep pencil-beam survey's line-of-sight (z)
+    depth is typically far larger than its transverse (x, y) footprint, and
+    inflating the transverse prior to match it wastes prior volume on bubble
+    centers far outside the surveyed sky area.
+
+    `r_bub`'s ceiling is set independently of the LOS extent (no plausible
+    single reionization-era bubble spans the hundreds of comoving Mpc a deep
+    spectroscopic survey can cover along the line of sight) and defaults to
+    the transverse extent instead, which is the axis that actually bounds a
+    single bubble's plausible size given this kind of data. Pass `r_max`
+    directly for an explicit physically-motivated cap instead.
+    """
+    x_half = pad_factor * np.abs(x).max()
+    y_half = pad_factor * np.abs(y).max()
+    z_half = pad_factor * np.abs(z).max()
+
+    if r_max is None:
+        r_max = pad_factor * max(np.abs(x).max(), np.abs(y).max())
+
+    prior_lo = np.array([-x_half, -y_half, -z_half, r_min])
+    prior_hi = np.array([x_half, y_half, z_half, r_max])
     return prior_lo, prior_hi

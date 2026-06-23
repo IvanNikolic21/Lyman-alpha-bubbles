@@ -67,12 +67,22 @@ def _prior_transform(u_):
 
 
 def _prior_transform_2bub(u_):
+    """Same per-axis box as the 1-bubble prior, doubled, with r1 >= r2 enforced
+    via a smooth ordering transform (r1 ~ Uniform(r_min, r_max), r2 ~ Uniform(
+    r_min, r1)) rather than a discrete swap. A discrete swap of just the radii
+    (leaving positions untouched) folds the unit-cube -> parameter mapping
+    discontinuously right where the two independently-drawn radii cross --
+    this wrecked dynesty's ellipsoidal bounding once r_max was tightened
+    (sampling efficiency collapsed to ~0.04%, >500k calls without converging).
+    The ordering transform is continuous everywhere, at the cost of a
+    different (but equally valid) marginal prior on r2."""
     s = _S
     p = np.empty(8)
-    p[:4] = s.prior_lo + u_[:4] * (s.prior_hi - s.prior_lo)
-    p[4:] = s.prior_lo + u_[4:] * (s.prior_hi - s.prior_lo)
-    if p[3] < p[7]:          # enforce r1 >= r2 to break bubble-swap symmetry
-        p[3], p[7] = p[7], p[3]
+    p[:3]  = s.prior_lo[:3] + u_[:3]  * (s.prior_hi[:3] - s.prior_lo[:3])
+    p[4:7] = s.prior_lo[:3] + u_[4:7] * (s.prior_hi[:3] - s.prior_lo[:3])
+    r_lo, r_hi = s.prior_lo[3], s.prior_hi[3]
+    p[3] = r_lo + u_[3] * (r_hi - r_lo)   # r1 ~ Uniform(r_lo, r_hi)
+    p[7] = r_lo + u_[7] * (p[3] - r_lo)   # r2 ~ Uniform(r_lo, r1)  -> r2 <= r1, continuous
     return p
 
 
@@ -188,7 +198,8 @@ def _log_likelihood_ew_2bub(theta):
 
 
 def build_state(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
-                z_min: float, muv_max: float, main_dir: str) -> dict:
+                z_min: float, muv_max: float, main_dir: str,
+                r_max: float = None) -> dict:
     """Load the catalog, select the redshift window, convert coordinates,
     build the data-driven prior, and populate `_S` with everything the
     likelihood needs. Returns the (x, y, z, prior_lo, prior_hi, ra0, dec0, z0)
@@ -214,9 +225,11 @@ def build_state(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
     x_gal, y_gal, z_gal, ra0, dec0, z0, x_mean, y_mean, z_mean = radec_to_comoving(
         cat.ra[in_window], cat.dec[in_window], redshifts
     )
-    prior_lo, prior_hi = data_driven_priors(x_gal, y_gal, z_gal)
+    prior_lo, prior_hi = data_driven_priors(x_gal, y_gal, z_gal, r_max=r_max)
     print(f"[build_state] field center: ra0={ra0:.5f} dec0={dec0:.5f} z0={z0:.4f}", flush=True)
-    print(f"[build_state] prior box: x,y,z in [{-prior_hi[0]:.2f}, {prior_hi[0]:.2f}] Mpc, "
+    print(f"[build_state] prior box: x in [{prior_lo[0]:.2f}, {prior_hi[0]:.2f}], "
+          f"y in [{prior_lo[1]:.2f}, {prior_hi[1]:.2f}], "
+          f"z in [{prior_lo[2]:.2f}, {prior_hi[2]:.2f}] Mpc, "
           f"r_bub in [{prior_lo[3]:.2f}, {prior_hi[3]:.2f}] Mpc", flush=True)
     print(f"[build_state] {is_ul.sum()} upper limits, {(~is_ul).sum()} detections "
           f"in this window.", flush=True)
@@ -324,14 +337,15 @@ def build_state(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
 
 
 def _run_dynesty(loglike, prior_transform, ndim, param_names,
-                 nlive: int, dlogz: float, n_workers: int, label: str) -> dict:
-    print(f"[{label}] Running dynesty (nlive={nlive}, dlogz={dlogz}, ndim={ndim})...",
-          flush=True)
+                 nlive: int, dlogz: float, n_workers: int, label: str,
+                 sample: str = 'auto') -> dict:
+    print(f"[{label}] Running dynesty (nlive={nlive}, dlogz={dlogz}, ndim={ndim}, "
+          f"sample={sample})...", flush=True)
     t0 = time.perf_counter()
     with mp.get_context('fork').Pool(n_workers) as pool:
         sampler = dynesty.NestedSampler(
             loglike, prior_transform, ndim=ndim, nlive=nlive,
-            pool=pool, queue_size=n_workers,
+            pool=pool, queue_size=n_workers, sample=sample,
         )
         sampler.run_nested(print_progress=True, dlogz=dlogz)
     wall_time = time.perf_counter() - t0
@@ -363,8 +377,9 @@ def _run_dynesty(loglike, prior_transform, ndim, param_names,
 
 def run(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
         nlive: int, dlogz: float, n_workers: int, z_min: float, muv_max: float,
-        main_dir: str) -> dict:
-    meta = build_state(catalog_path, z_lo, z_hi, n_inside_tau, z_min, muv_max, main_dir)
+        main_dir: str, r_max: float = None) -> dict:
+    meta = build_state(catalog_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
+                       main_dir, r_max=r_max)
     fit  = _run_dynesty(_log_likelihood_ew, _prior_transform, NDIM, PARAM_NAMES,
                         nlive, dlogz, n_workers, label='run')
     return dict(**meta, **fit)
@@ -372,19 +387,24 @@ def run(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
 
 def run_bayes_factor(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
                      nlive: int, dlogz: float, n_workers: int, z_min: float,
-                     muv_max: float, main_dir: str) -> dict:
+                     muv_max: float, main_dir: str, r_max: float = None) -> dict:
     """Fit M1 (1 bubble) and M2 (2 bubbles) to the same galaxy sample and
     compare their Bayesian evidence. `_S` is built once and shared by both
     fits (only the likelihood/prior/ndim differ)."""
-    meta = build_state(catalog_path, z_lo, z_hi, n_inside_tau, z_min, muv_max, main_dir)
+    meta = build_state(catalog_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
+                       main_dir, r_max=r_max)
 
     print("--- Model 1: single bubble ---", flush=True)
     fit1 = _run_dynesty(_log_likelihood_ew, _prior_transform, NDIM, PARAM_NAMES,
                         nlive, dlogz, n_workers, label='M1')
 
     print("--- Model 2: two bubbles ---", flush=True)
+    # 'rslice' (slice sampling) handles the narrow, mostly-empty 8D likelihood
+    # here far better than the default -- the default collapsed to <0.2%
+    # sampling efficiency once r_bub's ceiling was tightened to a physical scale.
     fit2 = _run_dynesty(_log_likelihood_ew_2bub, _prior_transform_2bub, NDIM_2BUB,
-                        PARAM_NAMES_2BUB, nlive, dlogz, n_workers, label='M2')
+                        PARAM_NAMES_2BUB, nlive, dlogz, n_workers, label='M2',
+                        sample='rslice')
 
     log_bf = float(fit2['logz']) - float(fit1['logz'])
     print(f"\n  log Z(M1) = {float(fit1['logz']):.2f} +/- {float(fit1['logzerr']):.2f}", flush=True)
@@ -422,6 +442,11 @@ if __name__ == '__main__':
                         help='Catalog-wide sanity filter (drop zspec <= z_min).')
     parser.add_argument('--muv_max', type=float, default=-18.0,
                         help='Catalog-wide sanity filter (drop muv >= muv_max).')
+    parser.add_argument('--r_max', type=float, default=None,
+                        help='Explicit r_bub prior ceiling (Mpc). Default: derived from '
+                             'the transverse (x,y) extent only, NOT the line-of-sight depth '
+                             '(a deep spectroscopic survey\'s LOS extent is typically far '
+                             'larger than any plausible single bubble).')
     parser.add_argument('--n_inside_tau', type=int, default=200)
     parser.add_argument('--nlive', type=int, default=300)
     parser.add_argument('--dlogz', type=float, default=0.5)
@@ -443,14 +468,14 @@ if __name__ == '__main__':
         result = run_bayes_factor(
             args.catalog, args.z_lo, args.z_hi, args.n_inside_tau,
             args.nlive, args.dlogz, args.n_workers, args.z_min, args.muv_max,
-            args.main_dir,
+            args.main_dir, r_max=args.r_max,
         )
         out_file = os.path.join(args.output_dir, f'bf_real_data_{fname_stem}.npz')
     else:
         result = run(
             args.catalog, args.z_lo, args.z_hi, args.n_inside_tau,
             args.nlive, args.dlogz, args.n_workers, args.z_min, args.muv_max,
-            args.main_dir,
+            args.main_dir, r_max=args.r_max,
         )
         out_file = os.path.join(args.output_dir, f'real_data_{fname_stem}.npz')
 
