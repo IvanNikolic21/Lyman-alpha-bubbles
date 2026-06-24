@@ -43,11 +43,15 @@ from lyabubbles.real_data import load_catalog, radec_to_comoving, data_driven_pr
 # ── Fixed settings ────────────────────────────────────────────────────────────
 NDIM         = 4
 NDIM_2BUB    = 8
+NDIM_3BUB    = 12
 N_ITER_BUB   = 1
 NU_STUDENT   = 3.0    # Student-t degrees of freedom, matches production_run.py
 PARAM_NAMES      = ['x_bub', 'y_bub', 'z_bub', 'r_bub']
 PARAM_NAMES_2BUB = ['x1_bub', 'y1_bub', 'z1_bub', 'r1_bub',
                     'x2_bub', 'y2_bub', 'z2_bub', 'r2_bub']
+PARAM_NAMES_3BUB = ['x1_bub', 'y1_bub', 'z1_bub', 'r1_bub',
+                    'x2_bub', 'y2_bub', 'z2_bub', 'r2_bub',
+                    'x3_bub', 'y3_bub', 'z3_bub', 'r3_bub']
 
 # EW upper limits carry no reported error. This sets how "soft" the censored
 # cumulative likelihood is, in Angstrom. It is a modeling assumption with no
@@ -83,6 +87,21 @@ def _prior_transform_2bub(u_):
     r_lo, r_hi = s.prior_lo[3], s.prior_hi[3]
     p[3] = r_lo + u_[3] * (r_hi - r_lo)   # r1 ~ Uniform(r_lo, r_hi)
     p[7] = r_lo + u_[7] * (p[3] - r_lo)   # r2 ~ Uniform(r_lo, r1)  -> r2 <= r1, continuous
+    return p
+
+
+def _prior_transform_3bub(u_):
+    """Same per-axis box tripled, with r1 >= r2 >= r3 via the same smooth
+    ordering transform as `_prior_transform_2bub`."""
+    s = _S
+    p = np.empty(12)
+    p[:3]   = s.prior_lo[:3] + u_[:3]   * (s.prior_hi[:3] - s.prior_lo[:3])
+    p[4:7]  = s.prior_lo[:3] + u_[4:7]  * (s.prior_hi[:3] - s.prior_lo[:3])
+    p[8:11] = s.prior_lo[:3] + u_[8:11] * (s.prior_hi[:3] - s.prior_lo[:3])
+    r_lo, r_hi = s.prior_lo[3], s.prior_hi[3]
+    p[3]  = r_lo + u_[3]  * (r_hi - r_lo)   # r1 ~ Uniform(r_lo, r_hi)
+    p[7]  = r_lo + u_[7]  * (p[3] - r_lo)   # r2 ~ Uniform(r_lo, r1)
+    p[11] = r_lo + u_[11] * (p[7] - r_lo)   # r3 ~ Uniform(r_lo, r2)
     return p
 
 
@@ -185,6 +204,42 @@ def _log_likelihood_ew_2bub(theta):
     # Galaxy inside both bubbles: take whichever near face is closer to the
     # observer (lower redshift -> lower tau_IGM to observer).
     z_end_bub_arr = np.minimum(z_end1, z_end2)
+
+    inside_gals = np.where(inside)[0]
+
+    ew_pred = s.ew_pred_outside.copy()
+
+    if len(inside_gals) > 0:
+        tau_now = _tau_now_for_inside(inside_gals, z_end_bub_arr)
+        ew_pred[inside_gals] = _ew_pred_for_inside(inside_gals, tau_now)
+
+    return _ew_loglike_from_pred(ew_pred)
+
+
+def _log_likelihood_ew_3bub(theta):
+    s = _S
+    x1, y1, z1, r1, x2, y2, z2, r2, x3, y3, z3, r3 = theta
+
+    dx1 = s.x_gal - x1;  dy1 = s.y_gal - y1;  dz1 = s.z_gal - z1
+    dx2 = s.x_gal - x2;  dy2 = s.y_gal - y2;  dz2 = s.z_gal - z2
+    dx3 = s.x_gal - x3;  dy3 = s.y_gal - y3;  dz3 = s.z_gal - z3
+
+    in1 = dx1**2 + dy1**2 + dz1**2 < r1**2
+    in2 = dx2**2 + dy2**2 + dz2**2 < r2**2
+    in3 = dx3**2 + dy3**2 + dz3**2 < r3**2
+    inside = in1 | in2 | in3
+
+    dist1 = dz1 + np.sqrt(np.maximum(r1**2 - dx1**2 - dy1**2, 0.0))
+    dist2 = dz2 + np.sqrt(np.maximum(r2**2 - dx2**2 - dy2**2, 0.0))
+    dist3 = dz3 + np.sqrt(np.maximum(r3**2 - dx3**2 - dy3**2, 0.0))
+
+    z_end1 = np.where(in1, s.redshifts - dist1 / s.R_H, np.inf)
+    z_end2 = np.where(in2, s.redshifts - dist2 / s.R_H, np.inf)
+    z_end3 = np.where(in3, s.redshifts - dist3 / s.R_H, np.inf)
+
+    # Galaxy inside multiple bubbles: take whichever near face is closer to
+    # the observer (lower redshift -> lower tau_IGM to observer).
+    z_end_bub_arr = np.minimum(np.minimum(z_end1, z_end2), z_end3)
 
     inside_gals = np.where(inside)[0]
 
@@ -429,6 +484,63 @@ def run_bayes_factor(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: 
     )
 
 
+def run_model_comparison(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
+                         nlive: int, dlogz: float, n_workers: int, z_min: float,
+                         muv_max: float, main_dir: str, r_max: float = None) -> dict:
+    """Fit M1 (1 bubble), M2 (2 bubbles), and M3 (3 bubbles) to the same galaxy
+    sample and compare their Bayesian evidence pairwise."""
+    meta = build_state(catalog_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
+                       main_dir, r_max=r_max)
+
+    print("--- Model 1: single bubble ---", flush=True)
+    fit1 = _run_dynesty(_log_likelihood_ew, _prior_transform, NDIM, PARAM_NAMES,
+                        nlive, dlogz, n_workers, label='M1')
+
+    print("--- Model 2: two bubbles ---", flush=True)
+    fit2 = _run_dynesty(_log_likelihood_ew_2bub, _prior_transform_2bub, NDIM_2BUB,
+                        PARAM_NAMES_2BUB, nlive, dlogz, n_workers, label='M2',
+                        sample='rslice')
+
+    print("--- Model 3: three bubbles ---", flush=True)
+    fit3 = _run_dynesty(_log_likelihood_ew_3bub, _prior_transform_3bub, NDIM_3BUB,
+                        PARAM_NAMES_3BUB, nlive, dlogz, n_workers, label='M3',
+                        sample='rslice')
+
+    log_bf_21 = float(fit2['logz']) - float(fit1['logz'])
+    log_bf_32 = float(fit3['logz']) - float(fit2['logz'])
+    log_bf_31 = float(fit3['logz']) - float(fit1['logz'])
+    print(f"\n  log Z(M1) = {float(fit1['logz']):.2f} +/- {float(fit1['logzerr']):.2f}", flush=True)
+    print(f"  log Z(M2) = {float(fit2['logz']):.2f} +/- {float(fit2['logzerr']):.2f}", flush=True)
+    print(f"  log Z(M3) = {float(fit3['logz']):.2f} +/- {float(fit3['logzerr']):.2f}", flush=True)
+    print(f"  log BF(M2/M1) = {log_bf_21:.2f}  ->  BF = {np.exp(log_bf_21):.2f}", flush=True)
+    print(f"  log BF(M3/M2) = {log_bf_32:.2f}  ->  BF = {np.exp(log_bf_32):.2f}", flush=True)
+    print(f"  log BF(M3/M1) = {log_bf_31:.2f}  ->  BF = {np.exp(log_bf_31):.2f}", flush=True)
+    best = max([('M1', float(fit1['logz'])), ('M2', float(fit2['logz'])),
+               ('M3', float(fit3['logz']))], key=lambda t: t[1])[0]
+    print(f"  Highest evidence: {best}", flush=True)
+
+    return dict(
+        **meta,
+        posterior_samples=fit1['posterior_samples'],
+        post_mean=fit1['post_mean'], post_median=fit1['post_median'],
+        post_std=fit1['post_std'], post_p16=fit1['post_p16'],
+        post_p84=fit1['post_p84'], post_map=fit1['post_map'],
+        logz=fit1['logz'], logzerr=fit1['logzerr'], ncall=fit1['ncall'],
+        wall_time=fit1['wall_time'] + fit2['wall_time'] + fit3['wall_time'],
+        posterior_samples_m2=fit2['posterior_samples'],
+        post_mean_m2=fit2['post_mean'], post_median_m2=fit2['post_median'],
+        post_std_m2=fit2['post_std'], post_p16_m2=fit2['post_p16'],
+        post_p84_m2=fit2['post_p84'], post_map_m2=fit2['post_map'],
+        logz_m2=fit2['logz'], logzerr_m2=fit2['logzerr'],
+        posterior_samples_m3=fit3['posterior_samples'],
+        post_mean_m3=fit3['post_mean'], post_median_m3=fit3['post_median'],
+        post_std_m3=fit3['post_std'], post_p16_m3=fit3['post_p16'],
+        post_p84_m3=fit3['post_p84'], post_map_m3=fit3['post_map'],
+        logz_m3=fit3['logz'], logzerr_m3=fit3['logzerr'],
+        log_bf_21=log_bf_21, log_bf_32=log_bf_32, log_bf_31=log_bf_31,
+    )
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--catalog', type=str, required=True)
@@ -458,13 +570,23 @@ if __name__ == '__main__':
     parser.add_argument('--bayes_factor', action='store_true',
                         help='Also fit a 2-bubble model and compare evidence against '
                              'the 1-bubble model (M2 vs M1).')
+    parser.add_argument('--three_bubble', action='store_true',
+                        help='Fit 1-, 2-, and 3-bubble models and compare evidence '
+                             'pairwise (M2/M1, M3/M2, M3/M1). Supersedes --bayes_factor.')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     z_lo_tag = f'{args.z_lo:.2f}' if args.z_lo is not None else 'min'
     fname_stem = f'z{z_lo_tag}-{args.z_hi:.2f}'
 
-    if args.bayes_factor:
+    if args.three_bubble:
+        result = run_model_comparison(
+            args.catalog, args.z_lo, args.z_hi, args.n_inside_tau,
+            args.nlive, args.dlogz, args.n_workers, args.z_min, args.muv_max,
+            args.main_dir, r_max=args.r_max,
+        )
+        out_file = os.path.join(args.output_dir, f'mc_real_data_{fname_stem}.npz')
+    elif args.bayes_factor:
         result = run_bayes_factor(
             args.catalog, args.z_lo, args.z_hi, args.n_inside_tau,
             args.nlive, args.dlogz, args.n_workers, args.z_min, args.muv_max,
@@ -496,17 +618,35 @@ if __name__ == '__main__':
         fig.savefig(corner_path, bbox_inches='tight', dpi=150)
         print(f"Saved {corner_path}", flush=True)
 
-        if args.bayes_factor:
+        if 'posterior_samples_m2' in result:
+            if args.three_bubble:
+                log_bf_label = f"log BF(M2/M1) = {float(result['log_bf_21']):.2f}"
+            else:
+                log_bf = float(result['log_bf'])
+                log_bf_label = (f"log BF(M2/M1) = {log_bf:.2f}  ->  BF = {np.exp(log_bf):.1f}  "
+                               f"({'M2 preferred' if log_bf > 0 else 'M1 preferred'})")
             fig2 = corner.corner(
                 result['posterior_samples_m2'], labels=PARAM_NAMES_2BUB,
                 show_titles=True, title_fmt='.2f', quantiles=[0.16, 0.5, 0.84],
             )
-            log_bf = float(result['log_bf'])
             fig2.suptitle(
                 f"M2 (2 bubbles)  z in [{args.z_lo}, {args.z_hi}], n_gal={result['n_gal']}\n"
-                f"log BF(M2/M1) = {log_bf:.2f}  ->  BF = {np.exp(log_bf):.1f}  "
-                f"({'M2 preferred' if log_bf > 0 else 'M1 preferred'})", y=1.03,
+                f"{log_bf_label}", y=1.03,
             )
             corner_path2 = out_file.replace('.npz', '_corner_m2.png')
             fig2.savefig(corner_path2, bbox_inches='tight', dpi=150)
             print(f"Saved {corner_path2}", flush=True)
+
+        if 'posterior_samples_m3' in result:
+            fig3 = corner.corner(
+                result['posterior_samples_m3'], labels=PARAM_NAMES_3BUB,
+                show_titles=True, title_fmt='.2f', quantiles=[0.16, 0.5, 0.84],
+            )
+            fig3.suptitle(
+                f"M3 (3 bubbles)  z in [{args.z_lo}, {args.z_hi}], n_gal={result['n_gal']}\n"
+                f"log BF(M3/M2) = {float(result['log_bf_32']):.2f}   "
+                f"log BF(M3/M1) = {float(result['log_bf_31']):.2f}", y=1.03,
+            )
+            corner_path3 = out_file.replace('.npz', '_corner_m3.png')
+            fig3.savefig(corner_path3, bbox_inches='tight', dpi=150)
+            print(f"Saved {corner_path3}", flush=True)
