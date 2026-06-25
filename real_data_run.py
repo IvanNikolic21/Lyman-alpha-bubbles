@@ -71,37 +71,65 @@ def _prior_transform(u_):
 
 
 def _prior_transform_2bub(u_):
-    """Same per-axis box as the 1-bubble prior, doubled, with r1 >= r2 enforced
-    via a smooth ordering transform (r1 ~ Uniform(r_min, r_max), r2 ~ Uniform(
-    r_min, r1)) rather than a discrete swap. A discrete swap of just the radii
-    (leaving positions untouched) folds the unit-cube -> parameter mapping
-    discontinuously right where the two independently-drawn radii cross --
-    this wrecked dynesty's ellipsoidal bounding once r_max was tightened
-    (sampling efficiency collapsed to ~0.04%, >500k calls without converging).
-    The ordering transform is continuous everywhere, at the cost of a
-    different (but equally valid) marginal prior on r2."""
+    """Same per-axis box as the 1-bubble prior, doubled, with bubbles ordered
+    by **redshift** (z1 >= z2, bubble 1 = highest z) via a smooth ordering
+    transform, rather than the radius ordering used previously.
+
+    Real bubbles in this kind of data are structurally separated in redshift
+    (distinct ionized patches along the line of sight), not necessarily in
+    size -- ordering by radius left the z-swap symmetry only partially broken,
+    which is exactly the multimodality (e.g. bimodal z2_bub, x2_bub) seen in
+    the M2/M3 corner plots. Ordering by z instead gives each bubble slot an
+    unambiguous identity (the redshift rank), so x, y, r are free and drawn
+    independently per bubble -- no swap-symmetry left to break there.
+
+    r's ceiling is `prior_hi[3] / 2`: the single-bubble budget (full LOS
+    extent, see `data_driven_priors`) split evenly between the two bubbles,
+    so the n-bubble models aren't unfairly tighter than the 1-bubble model
+    purely from prior-volume bookkeeping.
+    """
     s = _S
     p = np.empty(8)
-    p[:3]  = s.prior_lo[:3] + u_[:3]  * (s.prior_hi[:3] - s.prior_lo[:3])
-    p[4:7] = s.prior_lo[:3] + u_[4:7] * (s.prior_hi[:3] - s.prior_lo[:3])
-    r_lo, r_hi = s.prior_lo[3], s.prior_hi[3]
-    p[3] = r_lo + u_[3] * (r_hi - r_lo)   # r1 ~ Uniform(r_lo, r_hi)
-    p[7] = r_lo + u_[7] * (p[3] - r_lo)   # r2 ~ Uniform(r_lo, r1)  -> r2 <= r1, continuous
+    p[0] = s.prior_lo[0] + u_[0] * (s.prior_hi[0] - s.prior_lo[0])   # x1
+    p[1] = s.prior_lo[1] + u_[1] * (s.prior_hi[1] - s.prior_lo[1])   # y1
+    p[4] = s.prior_lo[0] + u_[4] * (s.prior_hi[0] - s.prior_lo[0])   # x2
+    p[5] = s.prior_lo[1] + u_[5] * (s.prior_hi[1] - s.prior_lo[1])   # y2
+
+    z_lo, z_hi = s.prior_lo[2], s.prior_hi[2]
+    p[2] = z_lo + u_[2] * (z_hi - z_lo)   # z1 ~ Uniform(z_lo, z_hi)
+    p[6] = z_lo + u_[6] * (p[2] - z_lo)   # z2 ~ Uniform(z_lo, z1)  -> z2 <= z1, continuous
+
+    r_lo = s.prior_lo[3]
+    r_hi = s.prior_hi[3] / 2.0
+    p[3] = r_lo + u_[3] * (r_hi - r_lo)   # r1, independent
+    p[7] = r_lo + u_[7] * (r_hi - r_lo)   # r2, independent
     return p
 
 
 def _prior_transform_3bub(u_):
-    """Same per-axis box tripled, with r1 >= r2 >= r3 via the same smooth
-    ordering transform as `_prior_transform_2bub`."""
+    """Same per-axis box tripled, with bubbles ordered by redshift
+    (z1 >= z2 >= z3) via the same smooth ordering transform as
+    `_prior_transform_2bub`; x, y, r free and independent per bubble.
+    r's ceiling is `prior_hi[3] / 3` (single-bubble budget split three ways)."""
     s = _S
     p = np.empty(12)
-    p[:3]   = s.prior_lo[:3] + u_[:3]   * (s.prior_hi[:3] - s.prior_lo[:3])
-    p[4:7]  = s.prior_lo[:3] + u_[4:7]  * (s.prior_hi[:3] - s.prior_lo[:3])
-    p[8:11] = s.prior_lo[:3] + u_[8:11] * (s.prior_hi[:3] - s.prior_lo[:3])
-    r_lo, r_hi = s.prior_lo[3], s.prior_hi[3]
-    p[3]  = r_lo + u_[3]  * (r_hi - r_lo)   # r1 ~ Uniform(r_lo, r_hi)
-    p[7]  = r_lo + u_[7]  * (p[3] - r_lo)   # r2 ~ Uniform(r_lo, r1)
-    p[11] = r_lo + u_[11] * (p[7] - r_lo)   # r3 ~ Uniform(r_lo, r2)
+    p[0] = s.prior_lo[0] + u_[0]  * (s.prior_hi[0] - s.prior_lo[0])   # x1
+    p[1] = s.prior_lo[1] + u_[1]  * (s.prior_hi[1] - s.prior_lo[1])   # y1
+    p[4] = s.prior_lo[0] + u_[4]  * (s.prior_hi[0] - s.prior_lo[0])   # x2
+    p[5] = s.prior_lo[1] + u_[5]  * (s.prior_hi[1] - s.prior_lo[1])   # y2
+    p[8] = s.prior_lo[0] + u_[8]  * (s.prior_hi[0] - s.prior_lo[0])   # x3
+    p[9] = s.prior_lo[1] + u_[9]  * (s.prior_hi[1] - s.prior_lo[1])   # y3
+
+    z_lo, z_hi = s.prior_lo[2], s.prior_hi[2]
+    p[2]  = z_lo + u_[2]  * (z_hi - z_lo)   # z1 ~ Uniform(z_lo, z_hi)
+    p[6]  = z_lo + u_[6]  * (p[2] - z_lo)   # z2 ~ Uniform(z_lo, z1)
+    p[10] = z_lo + u_[10] * (p[6] - z_lo)   # z3 ~ Uniform(z_lo, z2)
+
+    r_lo = s.prior_lo[3]
+    r_hi = s.prior_hi[3] / 3.0
+    p[3]  = r_lo + u_[3]  * (r_hi - r_lo)   # r1, independent
+    p[7]  = r_lo + u_[7]  * (r_hi - r_lo)   # r2, independent
+    p[11] = r_lo + u_[11] * (r_hi - r_lo)   # r3, independent
     return p
 
 

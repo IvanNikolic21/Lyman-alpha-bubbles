@@ -145,19 +145,23 @@ def data_driven_priors(x, y, z, pad_factor: float = 1.3, r_min: float = 0.5,
     inflating the transverse prior to match it wastes prior volume on bubble
     centers far outside the surveyed sky area.
 
-    `r_bub`'s ceiling is set independently of the LOS extent (no plausible
-    single reionization-era bubble spans the hundreds of comoving Mpc a deep
-    spectroscopic survey can cover along the line of sight) and defaults to
-    the transverse extent instead, which is the axis that actually bounds a
-    single bubble's plausible size given this kind of data. Pass `r_max`
-    directly for an explicit physically-motivated cap instead.
+    `r_bub`'s ceiling returned here is the **single-bubble (n_bubs=1) budget**:
+    a model with one bubble must be allowed to grow up to the full LOS extent
+    so it has a genuine chance to span widely-separated clusters of detections
+    -- capping it at the (much smaller) transverse extent would structurally
+    guarantee it loses a Bayes-factor comparison to multi-bubble models
+    regardless of what the data actually support. Multi-bubble models divide
+    this budget by their bubble count (`r_max / n_bubs` in `real_data_run.py`'s
+    prior transforms) so the comparison reflects an actual modeling tradeoff,
+    not an artifact of an arbitrarily tighter prior. Pass `r_max` directly to
+    override this default (e.g. for an explicit physically-motivated cap).
     """
     x_half = pad_factor * np.abs(x).max()
     y_half = pad_factor * np.abs(y).max()
     z_half = pad_factor * np.abs(z).max()
 
     if r_max is None:
-        r_max = pad_factor * max(np.abs(x).max(), np.abs(y).max())
+        r_max = z_half
 
     prior_lo = np.array([-x_half, -y_half, -z_half, r_min])
     prior_hi = np.array([x_half, y_half, z_half, r_max])
