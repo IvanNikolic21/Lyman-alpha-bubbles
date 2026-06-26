@@ -45,7 +45,8 @@ NDIM         = 4
 NDIM_2BUB    = 8
 NDIM_3BUB    = 12
 N_ITER_BUB   = 1
-NU_STUDENT   = 3.0    # Student-t degrees of freedom, matches production_run.py
+
+NU_STUDENT   = 10.0   # Student-t degrees of freedom (increased from 3.0 to sharpen tails)
 PARAM_NAMES      = ['x_bub', 'y_bub', 'z_bub', 'r_bub']
 PARAM_NAMES_2BUB = ['x1_bub', 'y1_bub', 'z1_bub', 'r1_bub',
                     'x2_bub', 'y2_bub', 'z2_bub', 'r2_bub']
