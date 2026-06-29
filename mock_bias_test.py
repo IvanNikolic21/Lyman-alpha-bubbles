@@ -217,6 +217,8 @@ def run_bias_seed(seed, n_bub, nlive, dlogz, n_workers):
         bias_map=bias_map,
         ew_obs_mock=ew_obs_mock,
         ew_err_mock=ew_err_mock,
+        prior_lo=rdr._S.prior_lo,
+        prior_hi=rdr._S.prior_hi,
         **fit,
     )
 
