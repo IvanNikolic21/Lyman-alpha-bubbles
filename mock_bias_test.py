@@ -219,6 +219,9 @@ def run_bias_seed(seed, n_bub, nlive, dlogz, n_workers):
         ew_err_mock=ew_err_mock,
         prior_lo=rdr._S.prior_lo,
         prior_hi=rdr._S.prior_hi,
+        x_gal=rdr._S.x_gal,
+        y_gal=rdr._S.y_gal,
+        z_gal=rdr._S.z_gal,
         **fit,
     )
 

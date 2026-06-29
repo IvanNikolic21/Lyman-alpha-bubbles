@@ -23,8 +23,15 @@ def main():
     args = parser.parse_args()
 
     d = dict(np.load(args.npz, allow_pickle=False))
-    prior_lo = d['prior_lo']
-    prior_hi = d['prior_hi']
+
+    # Tight survey volume: actual galaxy extent, no padding.
+    vol_lo = np.array([d['x_gal'].min(), d['y_gal'].min(), d['z_gal'].min()])
+    vol_hi = np.array([d['x_gal'].max(), d['y_gal'].max(), d['z_gal'].max()])
+    print(f'Survey volume (galaxy extent, no padding): '
+          f'x [{vol_lo[0]:.1f}, {vol_hi[0]:.1f}]  '
+          f'y [{vol_lo[1]:.1f}, {vol_hi[1]:.1f}]  '
+          f'z [{vol_lo[2]:.1f}, {vol_hi[2]:.1f}] Mpc')
+    print(f'Volume: {np.prod(vol_hi - vol_lo):.1f} Mpc^3')
 
     models = []
     if 'posterior_samples' in d:
@@ -45,7 +52,7 @@ def main():
     print()
 
     for n_bub, post, logz in models:
-        f_ions = f_ion_samples(post, prior_lo, prior_hi, n_bub,
+        f_ions = f_ion_samples(post, vol_lo, vol_hi, n_bub,
                                n_mc=args.n_mc, seed=n_bub)
         med = np.median(f_ions)
         p16 = np.percentile(f_ions, 16)

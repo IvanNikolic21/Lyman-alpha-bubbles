@@ -27,16 +27,18 @@ def load_seeds(result_dir, n_bub):
 
 # ── Ionized fraction ─────────────────────────────────────────────────────────
 
-def f_ion_samples(posterior_samples, prior_lo, prior_hi, n_bub, n_mc=20000, seed=0):
+def f_ion_samples(posterior_samples, vol_lo, vol_hi, n_bub, n_mc=20000, seed=0):
     """MC estimate of ionized volume fraction for each posterior sample.
 
-    Draws n_mc points uniformly in the prior box, checks which fall inside
-    at least one bubble, returns the fraction for each posterior sample.
+    Draws n_mc points uniformly in [vol_lo, vol_hi] (the tight galaxy extent,
+    no padding), checks which fall inside at least one bubble, returns the
+    fraction for each posterior sample.
 
     Parameters
     ----------
     posterior_samples : (n_post, ndim)
-    prior_lo, prior_hi : (4,) — the 1-bubble prior bounds; x/y/z box same for all models
+    vol_lo, vol_hi   : (3,) — [x_min, y_min, z_min] and [x_max, y_max, z_max]
+                        of the galaxy sample (no padding)
     n_bub : 1, 2, or 3
     n_mc  : MC points per posterior sample (20 000 gives < 1% MC error on f_ion)
 
@@ -45,8 +47,7 @@ def f_ion_samples(posterior_samples, prior_lo, prior_hi, n_bub, n_mc=20000, seed
     f_ions : (n_post,)
     """
     rng = np.random.default_rng(seed)
-    # Sample points uniform in the (x, y, z) prior box
-    pts = rng.uniform(size=(n_mc, 3)) * (prior_hi[:3] - prior_lo[:3]) + prior_lo[:3]
+    pts = rng.uniform(size=(n_mc, 3)) * (vol_hi - vol_lo) + vol_lo
 
     n_post = len(posterior_samples)
     f_ions = np.empty(n_post)
@@ -64,10 +65,10 @@ def f_ion_samples(posterior_samples, prior_lo, prior_hi, n_bub, n_mc=20000, seed
     return f_ions
 
 
-def f_ion_truth(theta_truth, prior_lo, prior_hi, n_bub, n_mc=100000, seed=1):
+def f_ion_truth(theta_truth, vol_lo, vol_hi, n_bub, n_mc=100000, seed=1):
     """High-accuracy MC estimate of the true ionized fraction for one theta."""
     return f_ion_samples(
-        theta_truth[np.newaxis, :], prior_lo, prior_hi, n_bub,
+        theta_truth[np.newaxis, :], vol_lo, vol_hi, n_bub,
         n_mc=n_mc, seed=seed,
     )[0]
 
@@ -106,8 +107,16 @@ def main():
     except KeyError:
         has_lae = False
 
-    prior_lo = results[0]['prior_lo']
-    prior_hi = results[0]['prior_hi']
+    # Tight survey volume: galaxy extent with no padding (same across all seeds).
+    x_gal = results[0]['x_gal']
+    y_gal = results[0]['y_gal']
+    z_gal = results[0]['z_gal']
+    vol_lo = np.array([x_gal.min(), y_gal.min(), z_gal.min()])
+    vol_hi = np.array([x_gal.max(), y_gal.max(), z_gal.max()])
+    print(f'Survey volume (galaxy extent, no padding): '
+          f'x [{vol_lo[0]:.1f}, {vol_hi[0]:.1f}]  '
+          f'y [{vol_lo[1]:.1f}, {vol_hi[1]:.1f}]  '
+          f'z [{vol_lo[2]:.1f}, {vol_hi[2]:.1f}] Mpc', flush=True)
 
     sigma = (p84 - p16) / 2.0
     resid = (median - truth) / np.where(sigma > 0, sigma, 1.0)
@@ -115,14 +124,14 @@ def main():
     # ── Ionized fraction ─────────────────────────────────────────────────────
     print('Computing ionized fractions...', flush=True)
     f_ion_true_all = np.array([
-        f_ion_truth(truth[s], prior_lo, prior_hi, args.n_bub)
+        f_ion_truth(truth[s], vol_lo, vol_hi, args.n_bub)
         for s in range(n_seeds)
     ])
     f_ion_post_all = []   # list of (n_post,) arrays, one per seed
     for s, r in enumerate(results):
         post = r['posterior_samples']   # (n_post, ndim)
         f_ion_post_all.append(
-            f_ion_samples(post, prior_lo, prior_hi, args.n_bub, n_mc=args.n_mc, seed=s)
+            f_ion_samples(post, vol_lo, vol_hi, args.n_bub, n_mc=args.n_mc, seed=s)
         )
 
     f_ion_post_median = np.array([np.median(f) for f in f_ion_post_all])
