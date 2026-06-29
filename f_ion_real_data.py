@@ -47,8 +47,7 @@ def main():
     fig, ax = plt.subplots(figsize=(7, 4))
     colors = {1: 'C0', 2: 'C1', 3: 'C2'}
 
-    print(f'\nIonized fraction f_ion within the prior box:')
-    print(f'  Volume: {np.prod(prior_hi[:3] - prior_lo[:3]):.1f} Mpc^3')
+    print(f'\nIonized fraction f_ion within the galaxy extent:')
     print()
 
     for n_bub, post, logz in models:
