@@ -15,10 +15,10 @@ stages once any intrinsic bias is characterised.
 
 Usage
 -----
-python mock_bias_test.py --catalog table.dat --z_lo 6.8 --z_hi 7.3 \
+python mock_bias_test.py --z_lo 6.8 --z_hi 7.3 \
     --n_bub 1 --n_seeds 8 --nlive 300 --output_dir bias_M1/
 
-python mock_bias_test.py --catalog table.dat --z_lo 6.8 --z_hi 7.3 \
+python mock_bias_test.py --z_lo 6.8 --z_hi 7.3 \
     --n_bub 2 --n_seeds 8 --nlive 300 --output_dir bias_M2/
 """
 
@@ -228,7 +228,13 @@ def run_bias_seed(seed, n_bub, nlive, dlogz, n_workers):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--catalog',      type=str,   required=True)
+    parser.add_argument('--lya_catalog',        type=str, default='tb_lya.txt')
+    parser.add_argument('--properties_catalog', type=str, default='sample_nirspec_properties.txt')
+    parser.add_argument('--prefer',             type=str, default='grating',
+                        choices=['grating', 'prism'])
+    parser.add_argument('--legacy_catalog',     type=str, default=None,
+                        help='If set, load the old single-file fixed-width catalog '
+                             '(e.g. table.dat) instead of the CDS two-file catalog.')
     parser.add_argument('--z_lo',         type=float, default=None)
     parser.add_argument('--z_hi',         type=float, default=7.3)
     parser.add_argument('--z_min',        type=float, default=5.0)
@@ -252,8 +258,9 @@ if __name__ == '__main__':
 
     # Build state once -- populates rdr._S with all precomputed galaxy quantities.
     rdr.build_state(
-        args.catalog, args.z_lo, args.z_hi, args.n_inside_tau,
-        args.z_min, args.muv_max, args.main_dir, r_max=args.r_max,
+        args.lya_catalog, args.properties_catalog, args.z_lo, args.z_hi, args.n_inside_tau,
+        args.z_min, args.muv_max, args.main_dir, r_max=args.r_max, prefer=args.prefer,
+        legacy_catalog_path=args.legacy_catalog,
     )
 
     all_results = []

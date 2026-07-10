@@ -2,18 +2,24 @@
 Bubble inference on a real EW catalog, likelihood computed directly on
 equivalent width (no spectral flux binning).
 
-Pipeline: load a fixed-width RA/Dec/zspec/EW catalog -> select a redshift
-window (a single bubble can only plausibly explain galaxies in one coeval
-slice) -> convert RA/Dec/z to comoving Mpc centered on the selected sample ->
-derive the (x, y, z, r_bub) prior box from the data extent -> run dynesty with
-a likelihood that compares model-predicted EW (intrinsic EW from the
-population p_EW model, attenuated by the bubble's IGM/CGM transmission) to
-the observed EW, using a censored (cumulative) likelihood for upper limits.
+Pipeline: load the two-file CDS catalog (`tb_lya.txt` Lya EW table +
+`sample_nirspec_properties.txt` position/Muv table, deduplicated via the
+properties table's `active` flag, grating EW preferred over prism when both
+are present) -> select a redshift window (a single bubble can only plausibly
+explain galaxies in one coeval slice) -> convert RA/Dec/z to comoving Mpc
+centered on the selected sample -> derive the (x, y, z, r_bub) prior box from
+the data extent -> run dynesty with a likelihood that compares
+model-predicted EW (intrinsic EW from the population p_EW model, attenuated
+by the bubble's IGM/CGM transmission) to the observed EW, using a censored
+(cumulative) likelihood for upper limits.
 
 Usage
 -----
-python real_data_run.py --catalog table.dat --z_lo 6.8 --z_hi 7.3 \
+python real_data_run.py --z_lo 6.8 --z_hi 7.3 \
     --nlive 300 --n_inside_tau 200 --output_dir real_data_results/
+
+To reproduce an old run against the single-file `table.dat` format instead:
+python real_data_run.py --legacy_catalog table.dat --z_lo 6.8 --z_hi 7.3 ...
 """
 
 import os
@@ -38,7 +44,7 @@ import astropy.units as u
 from lyabubbles.speed_up import get_content, calculate_taus_post_batched
 from lyabubbles.galaxy_prop import tau_CGM
 from lyabubbles.helpers import I
-from lyabubbles.real_data import load_catalog, radec_to_comoving, data_driven_priors
+from lyabubbles.real_data import load_catalog, load_catalog_v2, radec_to_comoving, data_driven_priors
 
 # ── Fixed settings ────────────────────────────────────────────────────────────
 NDIM         = 4
@@ -281,14 +287,24 @@ def _log_likelihood_ew_3bub(theta):
     return _ew_loglike_from_pred(ew_pred)
 
 
-def build_state(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
-                z_min: float, muv_max: float, main_dir: str,
-                r_max: float = None) -> dict:
+def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
+                n_inside_tau: int, z_min: float, muv_max: float, main_dir: str,
+                r_max: float = None, prefer: str = 'grating',
+                legacy_catalog_path: str = None) -> dict:
     """Load the catalog, select the redshift window, convert coordinates,
     build the data-driven prior, and populate `_S` with everything the
     likelihood needs. Returns the (x, y, z, prior_lo, prior_hi, ra0, dec0, z0)
-    metadata needed to interpret/rerun the fit."""
-    cat = load_catalog(catalog_path, z_min=z_min, muv_max=muv_max)
+    metadata needed to interpret/rerun the fit.
+
+    By default loads the two-file CDS catalog (`tb_lya.txt` Lya EW table +
+    `sample_nirspec_properties.txt` position/Muv table, deduplicated via the
+    properties table's `active` flag). Pass `legacy_catalog_path` to instead
+    reproduce an old run against the single-file `table.dat` format."""
+    if legacy_catalog_path is not None:
+        cat = load_catalog(legacy_catalog_path, z_min=z_min, muv_max=muv_max)
+    else:
+        cat = load_catalog_v2(lya_path, properties_path, z_min=z_min,
+                              muv_max=muv_max, prefer=prefer)
 
     z_lo_eff  = -np.inf if z_lo is None else z_lo
     in_window = (cat.redshift >= z_lo_eff) & (cat.redshift <= z_hi)
@@ -459,24 +475,28 @@ def _run_dynesty(loglike, prior_transform, ndim, param_names,
     )
 
 
-def run(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
+def run(lya_path: str, properties_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
         nlive: int, dlogz: float, n_workers: int, z_min: float, muv_max: float,
-        main_dir: str, r_max: float = None) -> dict:
-    meta = build_state(catalog_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
-                       main_dir, r_max=r_max)
+        main_dir: str, r_max: float = None, prefer: str = 'grating',
+        legacy_catalog_path: str = None) -> dict:
+    meta = build_state(lya_path, properties_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
+                       main_dir, r_max=r_max, prefer=prefer,
+                       legacy_catalog_path=legacy_catalog_path)
     fit  = _run_dynesty(_log_likelihood_ew, _prior_transform, NDIM, PARAM_NAMES,
                         nlive, dlogz, n_workers, label='run')
     return dict(**meta, **fit)
 
 
-def run_bayes_factor(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
-                     nlive: int, dlogz: float, n_workers: int, z_min: float,
-                     muv_max: float, main_dir: str, r_max: float = None) -> dict:
+def run_bayes_factor(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
+                     n_inside_tau: int, nlive: int, dlogz: float, n_workers: int,
+                     z_min: float, muv_max: float, main_dir: str, r_max: float = None,
+                     prefer: str = 'grating', legacy_catalog_path: str = None) -> dict:
     """Fit M1 (1 bubble) and M2 (2 bubbles) to the same galaxy sample and
     compare their Bayesian evidence. `_S` is built once and shared by both
     fits (only the likelihood/prior/ndim differ)."""
-    meta = build_state(catalog_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
-                       main_dir, r_max=r_max)
+    meta = build_state(lya_path, properties_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
+                       main_dir, r_max=r_max, prefer=prefer,
+                       legacy_catalog_path=legacy_catalog_path)
 
     print("--- Model 1: single bubble ---", flush=True)
     fit1 = _run_dynesty(_log_likelihood_ew, _prior_transform, NDIM, PARAM_NAMES,
@@ -513,13 +533,15 @@ def run_bayes_factor(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: 
     )
 
 
-def run_model_comparison(catalog_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
-                         nlive: int, dlogz: float, n_workers: int, z_min: float,
-                         muv_max: float, main_dir: str, r_max: float = None) -> dict:
+def run_model_comparison(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
+                         n_inside_tau: int, nlive: int, dlogz: float, n_workers: int,
+                         z_min: float, muv_max: float, main_dir: str, r_max: float = None,
+                         prefer: str = 'grating', legacy_catalog_path: str = None) -> dict:
     """Fit M1 (1 bubble), M2 (2 bubbles), and M3 (3 bubbles) to the same galaxy
     sample and compare their Bayesian evidence pairwise."""
-    meta = build_state(catalog_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
-                       main_dir, r_max=r_max)
+    meta = build_state(lya_path, properties_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
+                       main_dir, r_max=r_max, prefer=prefer,
+                       legacy_catalog_path=legacy_catalog_path)
 
     print("--- Model 1: single bubble ---", flush=True)
     fit1 = _run_dynesty(_log_likelihood_ew, _prior_transform, NDIM, PARAM_NAMES,
@@ -572,7 +594,17 @@ def run_model_comparison(catalog_path: str, z_lo: float, z_hi: float, n_inside_t
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--catalog', type=str, required=True)
+    parser.add_argument('--lya_catalog', type=str, default='tb_lya.txt',
+                        help='CDS Lya EW table (grating + prism, with upper-limit flags).')
+    parser.add_argument('--properties_catalog', type=str, default='sample_nirspec_properties.txt',
+                        help='CDS position/Muv/mass table; its `active` flag deduplicates '
+                             'SPURS/DIVER ids that duplicate a JADES/GTO source.')
+    parser.add_argument('--prefer', type=str, default='grating', choices=['grating', 'prism'],
+                        help='Which Lya EW measurement to use when a galaxy has both.')
+    parser.add_argument('--legacy_catalog', type=str, default=None,
+                        help='If set, ignore --lya_catalog/--properties_catalog/--prefer and '
+                             'load the old single-file fixed-width catalog (e.g. table.dat) '
+                             'instead, to reproduce a pre-CDS-catalog run.')
     parser.add_argument('--z_lo', type=float, default=None,
                         help='Lower edge of the redshift window for this bubble fit '
                              '(default: no extra lower cut beyond --z_min).')
@@ -610,23 +642,26 @@ if __name__ == '__main__':
 
     if args.three_bubble:
         result = run_model_comparison(
-            args.catalog, args.z_lo, args.z_hi, args.n_inside_tau,
+            args.lya_catalog, args.properties_catalog, args.z_lo, args.z_hi, args.n_inside_tau,
             args.nlive, args.dlogz, args.n_workers, args.z_min, args.muv_max,
-            args.main_dir, r_max=args.r_max,
+            args.main_dir, r_max=args.r_max, prefer=args.prefer,
+            legacy_catalog_path=args.legacy_catalog,
         )
         out_file = os.path.join(args.output_dir, f'mc_real_data_{fname_stem}.npz')
     elif args.bayes_factor:
         result = run_bayes_factor(
-            args.catalog, args.z_lo, args.z_hi, args.n_inside_tau,
+            args.lya_catalog, args.properties_catalog, args.z_lo, args.z_hi, args.n_inside_tau,
             args.nlive, args.dlogz, args.n_workers, args.z_min, args.muv_max,
-            args.main_dir, r_max=args.r_max,
+            args.main_dir, r_max=args.r_max, prefer=args.prefer,
+            legacy_catalog_path=args.legacy_catalog,
         )
         out_file = os.path.join(args.output_dir, f'bf_real_data_{fname_stem}.npz')
     else:
         result = run(
-            args.catalog, args.z_lo, args.z_hi, args.n_inside_tau,
+            args.lya_catalog, args.properties_catalog, args.z_lo, args.z_hi, args.n_inside_tau,
             args.nlive, args.dlogz, args.n_workers, args.z_min, args.muv_max,
-            args.main_dir, r_max=args.r_max,
+            args.main_dir, r_max=args.r_max, prefer=args.prefer,
+            legacy_catalog_path=args.legacy_catalog,
         )
         out_file = os.path.join(args.output_dir, f'real_data_{fname_stem}.npz')
 

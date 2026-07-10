@@ -75,6 +75,113 @@ def load_catalog(path: str, z_min: float = 5.0, muv_max: float = 0.0) -> Catalog
     )
 
 
+# CDS byte-by-byte layout for the two-file catalog (`tb_lya.txt` +
+# `sample_nirspec_properties.txt`), 0-indexed half-open colspecs for read_fwf.
+_LYA_COLSPECS = [(0, 14), (15, 19), (20, 25), (26, 32), (33, 38), (39, 44), (45, 46),
+                 (47, 53), (54, 59), (60, 65), (66, 67),
+                 (68, 76), (77, 85), (86, 94), (95, 96),
+                 (97, 105), (106, 114), (115, 123), (124, 125),
+                 (126, 132), (133, 139), (140, 146),
+                 (147, 153), (154, 160), (161, 167),
+                 (168, 179), (180, 181)]
+_LYA_COLNAMES = ['id', 'pid', 'zspec', 'ew_grat', 'ew_grat_lo', 'ew_grat_hi', 'ew_grat_lim',
+                 'ew_prism', 'ew_prism_lo', 'ew_prism_hi', 'ew_prism_lim',
+                 'fesc_grat', 'fesc_grat_lo', 'fesc_grat_hi', 'fesc_grat_lim',
+                 'fesc_prism', 'fesc_prism_lo', 'fesc_prism_hi', 'fesc_prism_lim',
+                 'fwhm', 'fwhm_lo', 'fwhm_hi', 'dv', 'dv_lo', 'dv_hi',
+                 'reference', 'active']
+_LYA_SKIPROWS = 125   # header + byte-by-byte description ends before the data block
+
+_PROP_COLSPECS = [(0, 13), (14, 18), (19, 30), (31, 41), (42, 48), (49, 56), (57, 64),
+                  (65, 70), (71, 76), (77, 83), (84, 89), (90, 95),
+                  (96, 102), (103, 109), (110, 116), (117, 118)]
+_PROP_COLNAMES = ['id', 'pid', 'ra', 'dec', 'zspec', 'magF150W', 'muv', 'muv_lo', 'muv_hi',
+                  'logm', 'logm_lo', 'logm_hi', 'sSFR', 'sSFR_lo', 'sSFR_hi', 'active']
+_PROP_SKIPROWS = 28
+
+_EW_SENTINEL = -99.0   # "no measurement in this channel" (distinct from a reported limit)
+
+
+def load_catalog_v2(lya_path: str, properties_path: str, z_min: float = 5.0,
+                    muv_max: float = 0.0, prefer: str = 'grating') -> CatalogData:
+    """Load the two-file CDS catalog (`tb_lya.txt` Lya EW table +
+    `sample_nirspec_properties.txt` position/Muv table) and merge into a
+    `CatalogData`, replacing the old single-file `table.dat` / `load_catalog`.
+
+    The properties table's `active` flag deduplicates galaxies independently
+    observed under both a SPURS/DIVER id and a JADES/GTO id (verified: e.g.
+    `DIVER-1018968` and `JADES-1166` sit at identical RA/Dec) -- only
+    `active == 1` rows are kept as the canonical galaxy list, matched by id
+    (case-insensitive) into the Lya table for EW.
+
+    `prefer` picks grating (R~1000) vs prism (R~100) EW when a galaxy has
+    both -- grating is used when present and falls back to prism only when
+    grating has no measurement at all (`ew_grat == -99`, distinct from a
+    reported non-detection). `prefer='prism'` inverts the fallback order.
+    """
+    if prefer not in ('grating', 'prism'):
+        raise ValueError(f"prefer must be 'grating' or 'prism', got {prefer!r}")
+
+    df_lya  = pd.read_fwf(lya_path, colspecs=_LYA_COLSPECS, names=_LYA_COLNAMES,
+                          skiprows=_LYA_SKIPROWS)
+    df_prop = pd.read_fwf(properties_path, colspecs=_PROP_COLSPECS, names=_PROP_COLNAMES,
+                          skiprows=_PROP_SKIPROWS)
+
+    df_lya['id_norm']  = df_lya['id'].str.upper().str.strip()
+    df_prop['id_norm'] = df_prop['id'].str.upper().str.strip()
+
+    prop_active = df_prop[df_prop['active'] == 1]
+    merged = prop_active.merge(df_lya, on='id_norm', how='inner', suffixes=('', '_lya'))
+    n_unmatched = len(prop_active) - len(merged)
+    if n_unmatched:
+        print(f"[load_catalog_v2] {n_unmatched} active properties rows had no "
+              f"matching Lya-table id and were dropped.", flush=True)
+
+    has_grat  = merged['ew_grat'].to_numpy() != _EW_SENTINEL
+    has_prism = merged['ew_prism'].to_numpy() != _EW_SENTINEL
+    use_grat  = has_grat if prefer == 'grating' else ~has_prism
+    has_any   = has_grat | has_prism
+
+    ew     = np.where(use_grat, merged['ew_grat'], merged['ew_prism'])
+    ew_lo  = np.where(use_grat, merged['ew_grat_lo'], merged['ew_prism_lo'])
+    ew_hi  = np.where(use_grat, merged['ew_grat_hi'], merged['ew_prism_hi'])
+    ew_lim = np.where(use_grat, merged['ew_grat_lim'], merged['ew_prism_lim']).astype(bool)
+
+    ew_err = np.where((ew_lo != _EW_SENTINEL) & (ew_hi != _EW_SENTINEL),
+                      (ew_lo + ew_hi) / 2.0, 1.0)   # placeholder for UL rows, unused downstream
+
+    zspec = merged['zspec'].to_numpy()
+    muv   = merged['muv'].to_numpy()
+
+    n_total  = len(merged)
+    sane_mask = (zspec > z_min) & (muv < muv_max) & (muv > -90)
+    keep_mask = has_any & sane_mask
+
+    print(f"[load_catalog_v2] {n_total} active rows total: "
+          f"{(~has_any).sum()} dropped (no EW in either channel), "
+          f"{(has_any & ~sane_mask).sum()} dropped (sanity filter: "
+          f"zspec<={z_min} or muv unphysical), "
+          f"{keep_mask.sum()} kept.", flush=True)
+    print(f"[load_catalog_v2] EW source: {(use_grat & keep_mask).sum()} grating, "
+          f"{(~use_grat & keep_mask).sum()} prism.", flush=True)
+
+    is_upper_limit = ew_lim[keep_mask]
+    print(f"[load_catalog_v2] of {keep_mask.sum()} kept: "
+          f"{is_upper_limit.sum()} upper limits, "
+          f"{(~is_upper_limit).sum()} detections.", flush=True)
+
+    return CatalogData(
+        id=merged['id'].to_numpy()[keep_mask],
+        ra=merged['ra'].to_numpy()[keep_mask],
+        dec=merged['dec'].to_numpy()[keep_mask],
+        redshift=zspec[keep_mask],
+        muv=muv[keep_mask],
+        ew=ew[keep_mask],
+        ew_err=ew_err[keep_mask],
+        is_upper_limit=is_upper_limit,
+    )
+
+
 def radec_to_comoving(ra, dec, redshift):
     """Flat-sky RA/Dec/z -> comoving-Mpc Cartesian, centered on the sample.
 
