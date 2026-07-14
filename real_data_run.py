@@ -13,6 +13,16 @@ model-predicted EW (intrinsic EW from the population p_EW model, attenuated
 by the bubble's IGM/CGM transmission) to the observed EW, using a censored
 (cumulative) likelihood for upper limits.
 
+The EW likelihood marginalizes over `n_inside_tau` MC draws of the nuisance
+line-profile/sightline realization per galaxy. Where a galaxy has a measured
+Lya escape fraction, it is used to *reweight* that marginalization towards
+the draws whose predicted transmission (`t_in`/`t_outside`, the model's
+prediction for fesc) is consistent with the observed fesc -- not as a second,
+independent likelihood term, since fesc and EW share the same underlying
+line-flux measurement. See `_fesc_log_weights` and
+`fesc_effective_sample_size` (the latter is a diagnostic for how much a
+galaxy's fesc measurement actually constrained the reweighting).
+
 Usage
 -----
 python real_data_run.py --z_lo 6.8 --z_hi 7.3 \
@@ -36,7 +46,7 @@ import types as _types
 import numpy as np
 import dynesty
 from dynesty.utils import resample_equal
-from scipy.special import logsumexp, gammaln, stdtr
+from scipy.special import logsumexp, gammaln, stdtr, log_ndtr
 from astropy.cosmology import Planck18 as Cosmo
 from astropy import constants as const
 import astropy.units as u
@@ -64,6 +74,18 @@ PARAM_NAMES_3BUB = ['x1_bub', 'y1_bub', 'z1_bub', 'r1_bub',
 # cumulative likelihood is, in Angstrom. It is a modeling assumption with no
 # data behind it (the catalog gives no error for these rows) -- tune freely.
 EW_UL_SCALE  = 5.0
+
+# fesc is used to reweight (not re-likelihood) the n_inside_tau MC draws used
+# to marginalize the EW likelihood -- see `_fesc_log_weights`. Grating and
+# prism fesc for the same galaxy typically disagree by ~2sigma (a systematic,
+# not just the reported statistical error), so the reported 1sigma error is
+# doubled to avoid the reweighting being overconfident about which channel is
+# "right". Detections use a Gaussian weight at that width; upper limits have
+# no reported error at all, so use a fixed fesc-space width instead (fesc is
+# O(0.01-1), so this is much narrower than EW_UL_SCALE's Angstrom scale) --
+# also a tunable modeling assumption, not data-derived.
+FESC_SIGMA_MULT = 2.0
+FESC_UL_SCALE   = 0.1
 
 wave_em  = np.linspace(1214, 1225., 100) * u.Angstrom
 wave_Lya = 1215.67 * u.Angstrom
@@ -168,18 +190,80 @@ def _tau_now_for_inside(inside_gals, z_end_bub_arr):
     return np.nan_to_num(tau_now, nan=np.inf)
 
 
-def _ew_pred_for_inside(inside_gals, tau_now):
+def _ew_and_t_for_inside(inside_gals, tau_now):
+    """Model-predicted EW *and* transmission fraction `t_in` for the galaxies
+    currently inside a bubble. `t_in` is the line-profile-weighted CGM+IGM
+    transmission -- it's the model's prediction for escape fraction, used by
+    `_fesc_log_weights` below."""
     s = _S
     weighted  = s.j_s[inside_gals] * s.tau_cgm[inside_gals][:, np.newaxis, :] * np.exp(-tau_now)
     numerator = np.trapz(weighted, wave_em.value, axis=2)
     t_in      = numerator / s.j_s_trapz_denom[inside_gals]
-    return s.ew_int[inside_gals] * t_in
+    return s.ew_int[inside_gals] * t_in, t_in
 
 
-def _ew_loglike_from_pred(ew_pred):
-    """Combine model-predicted EW (n_gal, K) into the total log-likelihood,
-    using a Student-t detection term and a censored (cumulative) term for
-    upper limits, marginalized over the K MC draws via logsumexp."""
+def _build_predictions(inside_gals, z_end_bub_arr):
+    """(n_gal, K) predicted EW and predicted transmission (== predicted fesc),
+    starting from the theta-independent "outside any bubble" baseline and
+    overwriting galaxies currently inside a bubble."""
+    s = _S
+    ew_pred = s.ew_pred_outside.copy()
+    t_pred  = s.t_outside.copy()
+    if len(inside_gals) > 0:
+        tau_now = _tau_now_for_inside(inside_gals, z_end_bub_arr)
+        ew_pred[inside_gals], t_pred[inside_gals] = _ew_and_t_for_inside(inside_gals, tau_now)
+    return ew_pred, t_pred
+
+
+def _fesc_log_weights(t_pred):
+    """Per-(galaxy, MC draw) importance weight, in log space, for reweighting
+    the EW marginalization onto the draws whose predicted transmission
+    `t_pred` is consistent with the observed fesc -- see the escape-fraction
+    design discussion: fesc isn't a second, independent likelihood factor
+    (it shares its numerator/noise with the EW measurement), it's a prior on
+    *which* of the K MC nuisance draws are physically plausible for this
+    galaxy. Detections get a Gaussian weight (width = FESC_SIGMA_MULT times
+    the reported 1sigma error, widened because grating/prism typically
+    disagree by ~2sigma); upper limits get a censored (cumulative) weight at
+    a fixed fesc-space scale (no error is reported for a non-detection).
+    Galaxies with no fesc measurement get uniform weight (log_w = 0 for all
+    draws), reducing exactly to the old unweighted marginalization.
+    """
+    s = _S
+    sigma      = FESC_SIGMA_MULT * s.fesc_err
+    z_det      = (s.fesc_obs[:, np.newaxis] - t_pred) / sigma[:, np.newaxis]
+    log_w_det  = -0.5 * z_det ** 2
+
+    z_ul       = (s.fesc_obs[:, np.newaxis] - t_pred) / FESC_UL_SCALE
+    log_w_ul   = log_ndtr(z_ul)
+
+    log_w = np.where(s.fesc_is_upper_limit[:, np.newaxis], log_w_ul, log_w_det)
+    log_w = np.where(s.fesc_has[:, np.newaxis], log_w, 0.0)
+    return log_w
+
+
+def fesc_effective_sample_size(theta, n_bub: int = 1):
+    """Diagnostic: per-galaxy Kish effective sample size of the fesc
+    reweighting at a given theta (e.g. the posterior MAP/median), out of
+    `n_inside_tau` draws. ESS -> n_inside_tau means fesc barely informed the
+    marginalization (weights ~uniform); ESS -> 1 means it's dominated by a
+    single draw -- a sign `n_inside_tau` should be increased for that galaxy,
+    or that the fesc measurement is in tension with every sampled draw."""
+    likelihood_fn = {1: _log_likelihood_ew,
+                     2: _log_likelihood_ew_2bub,
+                     3: _log_likelihood_ew_3bub}[n_bub]
+    _, t_pred = likelihood_fn(theta, _return_t_pred=True)
+    log_w = _fesc_log_weights(t_pred)
+    log_sum_w  = logsumexp(log_w, axis=1)
+    log_sum_w2 = logsumexp(2 * log_w, axis=1)
+    return np.exp(2 * log_sum_w - log_sum_w2)
+
+
+def _ew_loglike_from_pred(ew_pred, t_pred):
+    """Combine model-predicted EW and transmission (n_gal, K each) into the
+    total log-likelihood: a Student-t detection term and a censored
+    (cumulative) term for upper limits on EW, marginalized over the K MC
+    draws via a `fesc`-reweighted logsumexp (see `_fesc_log_weights`)."""
     s = _S
     diffs     = s.ew_obs[:, np.newaxis] - ew_pred                 # (n_gal, K)
     _log_norm = (gammaln((NU_STUDENT + 1) / 2) - gammaln(NU_STUDENT / 2)
@@ -188,17 +272,21 @@ def _ew_loglike_from_pred(ew_pred):
         -(NU_STUDENT + 1) / 2 * np.log1p((diffs / s.ew_err[:, np.newaxis]) ** 2 / NU_STUDENT)
         + _log_norm[:, np.newaxis]
     )
-    per_gal_det = logsumexp(log_p_det, axis=1) - np.log(s.n_inside_tau)
 
-    z_cdf       = (s.ew_obs[:, np.newaxis] - ew_pred) / EW_UL_SCALE
-    log_cdf     = np.log(stdtr(NU_STUDENT, z_cdf))
-    per_gal_ul  = logsumexp(log_cdf, axis=1) - np.log(s.n_inside_tau)
+    z_cdf   = (s.ew_obs[:, np.newaxis] - ew_pred) / EW_UL_SCALE
+    log_cdf = np.log(stdtr(NU_STUDENT, z_cdf))
+
+    log_w      = _fesc_log_weights(t_pred)
+    log_norm_w = logsumexp(log_w, axis=1)   # generalizes log(n_inside_tau) when log_w != 0
+
+    per_gal_det = logsumexp(log_p_det + log_w, axis=1) - log_norm_w
+    per_gal_ul  = logsumexp(log_cdf + log_w, axis=1) - log_norm_w
 
     per_gal = np.where(s.is_upper_limit, per_gal_ul, per_gal_det)
     return float(per_gal.sum())
 
 
-def _log_likelihood_ew(theta):
+def _log_likelihood_ew(theta, _return_t_pred=False):
     s = _S
     xb, yb, zb, rb = theta
     dx = s.x_gal - xb
@@ -209,16 +297,13 @@ def _log_likelihood_ew(theta):
     z_end_bub_arr = s.redshifts - np.where(inside, dist_arr / s.R_H, 0.0)
     inside_gals   = np.where(inside)[0]
 
-    ew_pred = s.ew_pred_outside.copy()   # (n_gal, K) — default, theta-independent
-
-    if len(inside_gals) > 0:
-        tau_now = _tau_now_for_inside(inside_gals, z_end_bub_arr)
-        ew_pred[inside_gals] = _ew_pred_for_inside(inside_gals, tau_now)
-
-    return _ew_loglike_from_pred(ew_pred)
+    ew_pred, t_pred = _build_predictions(inside_gals, z_end_bub_arr)
+    if _return_t_pred:
+        return ew_pred, t_pred
+    return _ew_loglike_from_pred(ew_pred, t_pred)
 
 
-def _log_likelihood_ew_2bub(theta):
+def _log_likelihood_ew_2bub(theta, _return_t_pred=False):
     s = _S
     x1, y1, z1, r1, x2, y2, z2, r2 = theta
 
@@ -242,16 +327,13 @@ def _log_likelihood_ew_2bub(theta):
 
     inside_gals = np.where(inside)[0]
 
-    ew_pred = s.ew_pred_outside.copy()
-
-    if len(inside_gals) > 0:
-        tau_now = _tau_now_for_inside(inside_gals, z_end_bub_arr)
-        ew_pred[inside_gals] = _ew_pred_for_inside(inside_gals, tau_now)
-
-    return _ew_loglike_from_pred(ew_pred)
+    ew_pred, t_pred = _build_predictions(inside_gals, z_end_bub_arr)
+    if _return_t_pred:
+        return ew_pred, t_pred
+    return _ew_loglike_from_pred(ew_pred, t_pred)
 
 
-def _log_likelihood_ew_3bub(theta):
+def _log_likelihood_ew_3bub(theta, _return_t_pred=False):
     s = _S
     x1, y1, z1, r1, x2, y2, z2, r2, x3, y3, z3, r3 = theta
 
@@ -278,13 +360,10 @@ def _log_likelihood_ew_3bub(theta):
 
     inside_gals = np.where(inside)[0]
 
-    ew_pred = s.ew_pred_outside.copy()
-
-    if len(inside_gals) > 0:
-        tau_now = _tau_now_for_inside(inside_gals, z_end_bub_arr)
-        ew_pred[inside_gals] = _ew_pred_for_inside(inside_gals, tau_now)
-
-    return _ew_loglike_from_pred(ew_pred)
+    ew_pred, t_pred = _build_predictions(inside_gals, z_end_bub_arr)
+    if _return_t_pred:
+        return ew_pred, t_pred
+    return _ew_loglike_from_pred(ew_pred, t_pred)
 
 
 def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
@@ -321,6 +400,20 @@ def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
     is_ul     = cat.is_upper_limit[in_window]
     redshifts = cat.redshift[in_window]
     beta      = np.full(n_gal, -2.0)
+
+    # fesc only comes from load_catalog_v2 (the legacy table.dat format has no
+    # fesc column) -- fesc_has all-False makes `_fesc_log_weights` reduce to
+    # uniform weighting for a legacy-catalog run, i.e. the old behavior.
+    if cat.fesc is not None:
+        fesc_obs = cat.fesc[in_window]
+        fesc_err = cat.fesc_err[in_window]
+        fesc_is_ul = cat.fesc_is_upper_limit[in_window]
+        fesc_has = cat.fesc_has_measurement[in_window]
+    else:
+        fesc_obs = np.zeros(n_gal)
+        fesc_err = np.ones(n_gal)
+        fesc_is_ul = np.zeros(n_gal, dtype=bool)
+        fesc_has = np.zeros(n_gal, dtype=bool)
 
     x_gal, y_gal, z_gal, ra0, dec0, z0, x_mean, y_mean, z_mean = radec_to_comoving(
         cat.ra[in_window], cat.dec[in_window], redshifts
@@ -418,14 +511,24 @@ def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
     _S.j_s             = j_s
     _S.tau_cgm         = tau_cgm
     _S.j_s_trapz_denom = j_s_trapz_denom
-    _S.ew_int          = ew_int
-    _S.ew_pred_outside = ew_pred_outside
-    _S.ew_obs          = ew_obs
-    _S.ew_err          = np.where(is_ul, 1.0, ew_err)   # placeholder for unused branch
-    _S.is_upper_limit  = is_ul
-    _S.n_inside_tau    = n_inside_tau
+    _S.ew_int              = ew_int
+    _S.ew_pred_outside     = ew_pred_outside
+    _S.t_outside           = t_outside
+    _S.ew_obs              = ew_obs
+    _S.ew_err              = np.where(is_ul, 1.0, ew_err)   # placeholder for unused branch
+    _S.is_upper_limit      = is_ul
+    _S.fesc_obs            = fesc_obs
+    _S.fesc_err            = np.where(fesc_has, fesc_err, 1.0)   # placeholder, unused where fesc_has is False
+    _S.fesc_is_upper_limit = fesc_is_ul
+    _S.fesc_has            = fesc_has
+    _S.n_inside_tau        = n_inside_tau
     _S.prior_lo        = prior_lo
     _S.prior_hi        = prior_hi
+
+    print(f"[build_state] fesc reweighting: {fesc_has.sum()} of {n_gal} galaxies have "
+          f"a fesc measurement to reweight the EW marginalization "
+          f"(sigma x{FESC_SIGMA_MULT} for detections, fixed scale {FESC_UL_SCALE} for limits).",
+          flush=True)
 
     return dict(
         n_gal=n_gal, ra0=ra0, dec0=dec0, z0=z0,
@@ -433,6 +536,8 @@ def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
         prior_lo=prior_lo, prior_hi=prior_hi,
         x_gal=x_gal, y_gal=y_gal, z_gal=z_gal, redshifts=redshifts,
         ew_obs=ew_obs, ew_err=ew_err, is_upper_limit=is_ul,
+        fesc_obs=fesc_obs, fesc_err=fesc_err, fesc_is_upper_limit=fesc_is_ul,
+        fesc_has_measurement=fesc_has,
     )
 
 
@@ -466,12 +571,33 @@ def _run_dynesty(loglike, prior_transform, ndim, param_names,
         print(f"  {_pn:6s}  median={post_median[_pi]:.3f}  map={post_map[_pi]:.3f}  "
               f"std={post_std[_pi]:.3f}  [{post_p16[_pi]:.2f}, {post_p84[_pi]:.2f}]", flush=True)
 
+    # fesc-reweighting diagnostic at the MAP point: Kish effective sample size
+    # per galaxy, out of n_inside_tau draws. Only meaningful for galaxies with
+    # a fesc measurement (fesc_has); those without sit at ESS == n_inside_tau
+    # (uniform weight, unaffected) and are excluded from the summary below.
+    n_bub = ndim // 4
+    ess = fesc_effective_sample_size(post_map, n_bub=n_bub)
+    has = _S.fesc_has
+    if has.any():
+        ess_has = ess[has]
+        print(f"[{label}] fesc ESS at MAP ({has.sum()} galaxies with fesc, "
+              f"n_inside_tau={_S.n_inside_tau}): "
+              f"min={ess_has.min():.0f} median={np.median(ess_has):.0f} "
+              f"max={ess_has.max():.0f}", flush=True)
+        low = np.where(has)[0][ess_has < 0.05 * _S.n_inside_tau]
+        if len(low):
+            print(f"[{label}] WARNING: {len(low)} galaxies have fesc ESS < 5% of "
+                  f"n_inside_tau (indices {low.tolist()}) -- the fesc measurement is "
+                  f"in strong tension with the sampled draws there, or n_inside_tau "
+                  f"is too small to resolve it. Consider raising n_inside_tau.", flush=True)
+
     return dict(
         posterior_samples=equal_samples,
         post_mean=post_mean, post_median=post_median, post_std=post_std,
         post_p16=post_p16, post_p84=post_p84, post_map=post_map,
         logz=results.logz[-1], logzerr=results.logzerr[-1],
         ncall=results.ncall.sum(), wall_time=wall_time,
+        fesc_ess=ess,
     )
 
 
@@ -596,7 +722,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--lya_catalog', type=str, default='tb_lya.txt',
                         help='CDS Lya EW table (grating + prism, with upper-limit flags).')
-    parser.add_argument('--properties_catalog', type=str, default='sample_nirspec_properties.txt',
+    parser.add_argument('--properties_catalog', type=str, default='d',
                         help='CDS position/Muv/mass table; its `active` flag deduplicates '
                              'SPURS/DIVER ids that duplicate a JADES/GTO source.')
     parser.add_argument('--prefer', type=str, default='grating', choices=['grating', 'prism'],

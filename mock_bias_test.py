@@ -192,6 +192,10 @@ def run_bias_seed(seed, n_bub, nlive, dlogz, n_workers):
     s.ew_obs          = ew_obs_mock
     s.ew_err          = ew_err_mock
     s.is_upper_limit  = np.zeros(len(ew_obs_mock), dtype=bool)
+    # Real fesc is also derived from the true Lya flux -- same circularity
+    # reasoning as ew_err/is_upper_limit above, so disable its reweighting of
+    # the EW marginalization for these synthetic-truth mocks.
+    s.fesc_has        = np.zeros(len(ew_obs_mock), dtype=bool)
 
     fit = rdr._run_dynesty(
         _LOG_LIKES[n_bub], _PRIOR_TRANSFORMS[n_bub], _NDIMS[n_bub],

@@ -29,6 +29,13 @@ class CatalogData:
     ew: np.ndarray
     ew_err: np.ndarray
     is_upper_limit: np.ndarray
+    # Lya escape fraction, tied to the same grating/prism channel used for `ew`
+    # above (only `load_catalog_v2` populates these; `load_catalog`/table.dat
+    # has no fesc column, so these stay None for legacy-catalog runs).
+    fesc: np.ndarray = None
+    fesc_err: np.ndarray = None
+    fesc_is_upper_limit: np.ndarray = None
+    fesc_has_measurement: np.ndarray = None
 
 
 def load_catalog(path: str, z_min: float = 5.0, muv_max: float = 0.0) -> CatalogData:
@@ -150,6 +157,21 @@ def load_catalog_v2(lya_path: str, properties_path: str, z_min: float = 5.0,
     ew_err = np.where((ew_lo != _EW_SENTINEL) & (ew_hi != _EW_SENTINEL),
                       (ew_lo + ew_hi) / 2.0, 1.0)   # placeholder for UL rows, unused downstream
 
+    # fesc is tied to the SAME channel selected for EW above, not re-derived
+    # independently -- they come from the same reduction/measurement, so
+    # mixing e.g. a grating EW with a prism fesc would be physically
+    # inconsistent. In this catalog every galaxy with an EW measurement on
+    # its selected channel also has fesc on that channel, so this costs
+    # nothing in practice (verified: 0 galaxies lost).
+    fesc     = np.where(use_grat, merged['fesc_grat'], merged['fesc_prism'])
+    fesc_lo  = np.where(use_grat, merged['fesc_grat_lo'], merged['fesc_prism_lo'])
+    fesc_hi  = np.where(use_grat, merged['fesc_grat_hi'], merged['fesc_prism_hi'])
+    fesc_lim = np.where(use_grat, merged['fesc_grat_lim'], merged['fesc_prism_lim']).astype(bool)
+    fesc_has = fesc != _EW_SENTINEL
+
+    fesc_err = np.where((fesc_lo != _EW_SENTINEL) & (fesc_hi != _EW_SENTINEL),
+                        (fesc_lo + fesc_hi) / 2.0, np.nan)   # nan for UL rows / missing, unused downstream
+
     zspec = merged['zspec'].to_numpy()
     muv   = merged['muv'].to_numpy()
 
@@ -170,6 +192,12 @@ def load_catalog_v2(lya_path: str, properties_path: str, z_min: float = 5.0,
           f"{is_upper_limit.sum()} upper limits, "
           f"{(~is_upper_limit).sum()} detections.", flush=True)
 
+    fesc_has_kept = fesc_has[keep_mask]
+    print(f"[load_catalog_v2] fesc (same channel as EW): {fesc_has_kept.sum()} of "
+          f"{keep_mask.sum()} have a measurement "
+          f"({(fesc_lim[keep_mask] & fesc_has_kept).sum()} upper limits, "
+          f"{(~fesc_lim[keep_mask] & fesc_has_kept).sum()} detections).", flush=True)
+
     return CatalogData(
         id=merged['id'].to_numpy()[keep_mask],
         ra=merged['ra'].to_numpy()[keep_mask],
@@ -179,6 +207,10 @@ def load_catalog_v2(lya_path: str, properties_path: str, z_min: float = 5.0,
         ew=ew[keep_mask],
         ew_err=ew_err[keep_mask],
         is_upper_limit=is_upper_limit,
+        fesc=fesc[keep_mask],
+        fesc_err=fesc_err[keep_mask],
+        fesc_is_upper_limit=fesc_lim[keep_mask],
+        fesc_has_measurement=fesc_has_kept,
     )
 
 
