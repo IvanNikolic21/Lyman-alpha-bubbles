@@ -49,6 +49,7 @@ import numpy as np
 import dynesty
 from dynesty.utils import resample_equal
 from scipy.special import logsumexp, gammaln, stdtr, log_ndtr
+from scipy.stats import exponnorm
 from astropy.cosmology import Planck18 as Cosmo
 from astropy import constants as const
 import astropy.units as u
@@ -89,6 +90,15 @@ EW_UL_SCALE  = 5.0
 FESC_SIGMA_MULT = 2.0
 FESC_UL_SCALE   = 0.1
 
+# Bubble-radius prior: exponentially-modified-Gaussian (K, loc, scale) fit by
+# MLE to a simulation-derived bubble size distribution (watershed segmentation
+# of a neutral-fraction cube), chosen over skew-normal/log-normal candidates
+# by AIC. Replaces the previous uniform r_bub prior. Every bubble in every
+# model (M1/M2/M3) draws independently from this SAME distribution, truncated
+# to [prior_lo[3], prior_hi[3]] -- the single-bubble LOS-depth budget from
+# `data_driven_priors`, no longer split by n_bub (see `_prior_transform_2bub`).
+R_BUB_DIST_PARAMS = (1.787595494643556, 8.57306023571156, 2.438386898231336)   # (K, loc, scale)
+
 wave_em  = np.linspace(1214, 1225., 100) * u.Angstrom
 wave_Lya = 1215.67 * u.Angstrom
 
@@ -96,9 +106,24 @@ wave_Lya = 1215.67 * u.Angstrom
 _S = _types.SimpleNamespace()
 
 
+def _r_bub_prior_transform(u_, r_lo, r_hi):
+    """Inverse-CDF sample from `R_BUB_DIST_PARAMS`'s exponentially-modified-
+    Gaussian, truncated (and renormalized) to [r_lo, r_hi]. Truncating rather
+    than resampling/rejecting keeps this a valid, bijective prior transform
+    (required by dynesty) at the same cost as the untruncated case."""
+    f_lo = exponnorm.cdf(r_lo, *R_BUB_DIST_PARAMS)
+    f_hi = exponnorm.cdf(r_hi, *R_BUB_DIST_PARAMS)
+    return exponnorm.ppf(f_lo + u_ * (f_hi - f_lo), *R_BUB_DIST_PARAMS)
+
+
 def _prior_transform(u_):
     s = _S
-    return s.prior_lo + u_ * (s.prior_hi - s.prior_lo)
+    p = np.empty(4)
+    p[0] = s.prior_lo[0] + u_[0] * (s.prior_hi[0] - s.prior_lo[0])   # x
+    p[1] = s.prior_lo[1] + u_[1] * (s.prior_hi[1] - s.prior_lo[1])   # y
+    p[2] = s.prior_lo[2] + u_[2] * (s.prior_hi[2] - s.prior_lo[2])   # z
+    p[3] = _r_bub_prior_transform(u_[3], s.prior_lo[3], s.prior_hi[3])   # r
+    return p
 
 
 def _prior_transform_2bub(u_):
@@ -114,10 +139,14 @@ def _prior_transform_2bub(u_):
     unambiguous identity (the redshift rank), so x, y, r are free and drawn
     independently per bubble -- no swap-symmetry left to break there.
 
-    r's ceiling is `prior_hi[3] / 2`: the single-bubble budget (full LOS
-    extent, see `data_driven_priors`) split evenly between the two bubbles,
-    so the n-bubble models aren't unfairly tighter than the 1-bubble model
-    purely from prior-volume bookkeeping.
+    r1, r2 each draw independently from `R_BUB_DIST_PARAMS`'s bubble-size
+    distribution, truncated to [prior_lo[3], prior_hi[3]] -- the same
+    single-bubble LOS-depth ceiling used by `_prior_transform`, NOT split by
+    n_bub. Each bubble is a draw from the same physical size population, not
+    a share of an artificial prior-volume budget -- splitting it was only
+    ever a bookkeeping hack to keep the n-bubble models from an unearned
+    Occam-factor advantage/disadvantage, and it's no longer needed now that
+    r itself carries real physical information (see `_r_bub_prior_transform`).
     """
     s = _S
     p = np.empty(8)
@@ -130,18 +159,17 @@ def _prior_transform_2bub(u_):
     p[2] = z_lo + u_[2] * (z_hi - z_lo)   # z1 ~ Uniform(z_lo, z_hi)
     p[6] = z_lo + u_[6] * (p[2] - z_lo)   # z2 ~ Uniform(z_lo, z1)  -> z2 <= z1, continuous
 
-    r_lo = s.prior_lo[3]
-    r_hi = s.prior_hi[3] / 2.0
-    p[3] = r_lo + u_[3] * (r_hi - r_lo)   # r1, independent
-    p[7] = r_lo + u_[7] * (r_hi - r_lo)   # r2, independent
+    p[3] = _r_bub_prior_transform(u_[3], s.prior_lo[3], s.prior_hi[3])   # r1, independent
+    p[7] = _r_bub_prior_transform(u_[7], s.prior_lo[3], s.prior_hi[3])   # r2, independent
     return p
 
 
 def _prior_transform_3bub(u_):
     """Same per-axis box tripled, with bubbles ordered by redshift
     (z1 >= z2 >= z3) via the same smooth ordering transform as
-    `_prior_transform_2bub`; x, y, r free and independent per bubble.
-    r's ceiling is `prior_hi[3] / 3` (single-bubble budget split three ways)."""
+    `_prior_transform_2bub`; x, y free and independent per bubble. r1, r2, r3
+    each draw independently from the same bubble-size distribution (see
+    `_prior_transform_2bub`'s docstring -- no n_bub split)."""
     s = _S
     p = np.empty(12)
     p[0] = s.prior_lo[0] + u_[0]  * (s.prior_hi[0] - s.prior_lo[0])   # x1
@@ -156,11 +184,9 @@ def _prior_transform_3bub(u_):
     p[6]  = z_lo + u_[6]  * (p[2] - z_lo)   # z2 ~ Uniform(z_lo, z1)
     p[10] = z_lo + u_[10] * (p[6] - z_lo)   # z3 ~ Uniform(z_lo, z2)
 
-    r_lo = s.prior_lo[3]
-    r_hi = s.prior_hi[3] / 3.0
-    p[3]  = r_lo + u_[3]  * (r_hi - r_lo)   # r1, independent
-    p[7]  = r_lo + u_[7]  * (r_hi - r_lo)   # r2, independent
-    p[11] = r_lo + u_[11] * (r_hi - r_lo)   # r3, independent
+    p[3]  = _r_bub_prior_transform(u_[3],  s.prior_lo[3], s.prior_hi[3])   # r1, independent
+    p[7]  = _r_bub_prior_transform(u_[7],  s.prior_lo[3], s.prior_hi[3])   # r2, independent
+    p[11] = _r_bub_prior_transform(u_[11], s.prior_lo[3], s.prior_hi[3])   # r3, independent
     return p
 
 

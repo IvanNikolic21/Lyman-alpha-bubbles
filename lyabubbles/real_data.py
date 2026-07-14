@@ -146,7 +146,7 @@ def _dedup_by_position(df, sep_arcsec: float = 2.0, dz: float = 0.05):
 
 def load_catalog_v2(lya_path: str, properties_path: str, z_min: float = 5.0,
                     muv_max: float = 0.0, prefer: str = 'grating',
-                    dedup_sep_arcsec: float = 2.0, dedup_dz: float = 0.05) -> CatalogData:
+                    dedup_sep_arcsec: float = 0.3, dedup_dz: float = 0.05) -> CatalogData:
     """Load the two-file CDS catalog (`tb_lya.txt` Lya EW table +
     `sample_nirspec_properties.txt` position/Muv table) and merge into a
     `CatalogData`, replacing the old single-file `table.dat` / `load_catalog`.
@@ -155,14 +155,16 @@ def load_catalog_v2(lya_path: str, properties_path: str, z_min: float = 5.0,
     duplicates of the same physical galaxy (checked directly: most
     `active == 0` rows sit >5" from any `active == 1` row -- i.e. they're
     real, independent sources, not duplicates -- while at least one
-    `active == 1` pair, e.g. `GO4762-45417`/`JADES-24819`, sits 0.4" apart
-    with near-identical Lya/Muv measurements, i.e. IS a duplicate the flag
-    misses entirely). So `active` is ignored here; duplicates are instead
-    found purely by position (`dedup_sep_arcsec`, default 2") and redshift
-    (`dedup_dz`, default 0.05) matching among ALL properties rows. Within a
-    duplicate cluster, the representative kept is whichever row has the more
-    informative Lya measurement (a detection beats an upper limit beats
-    nothing), tie-broken by the tighter-constrained Muv.
+    `active == 1` pair, `DIVER-1018968`/`JADES-1166`, sits at essentially
+    identical RA/Dec, i.e. IS a duplicate the flag doesn't distinguish from
+    any other row). So `active` is ignored here; duplicates are instead found
+    purely by position (`dedup_sep_arcsec`, default 0.3" -- tight enough that
+    e.g. `spurs-gn-40`/`JADES-3982` at 0.71" apart are correctly treated as
+    two independent sources, not merged) and redshift (`dedup_dz`, default
+    0.05) matching among ALL properties rows. Within a duplicate cluster, the
+    representative kept is whichever row has the more informative Lya
+    measurement (a detection beats an upper limit beats nothing), tie-broken
+    by the tighter-constrained Muv.
 
     `prefer` picks grating (R~1000) vs prism (R~100) EW when a galaxy has
     both -- grating is used when present and falls back to prism only when
@@ -360,16 +362,17 @@ def data_driven_priors(x, y, z, pad_factor: float = 1.3, r_min: float = 0.5,
     inflating the transverse prior to match it wastes prior volume on bubble
     centers far outside the surveyed sky area.
 
-    `r_bub`'s ceiling returned here is the **single-bubble (n_bubs=1) budget**:
-    a model with one bubble must be allowed to grow up to the full LOS extent
-    so it has a genuine chance to span widely-separated clusters of detections
-    -- capping it at the (much smaller) transverse extent would structurally
-    guarantee it loses a Bayes-factor comparison to multi-bubble models
-    regardless of what the data actually support. Multi-bubble models divide
-    this budget by their bubble count (`r_max / n_bubs` in `real_data_run.py`'s
-    prior transforms) so the comparison reflects an actual modeling tradeoff,
-    not an artifact of an arbitrarily tighter prior. Pass `r_max` directly to
-    override this default (e.g. for an explicit physically-motivated cap).
+    `r_bub`'s ceiling returned here is used as the truncation bound for
+    `real_data_run.py`'s bubble-size prior (a simulation-derived
+    exponentially-modified-Gaussian, see `R_BUB_DIST_PARAMS`) -- every bubble
+    in every model (M1/M2/M3) is truncated at this SAME ceiling, not split by
+    bubble count. A model with one bubble must be allowed to grow up to the
+    full LOS extent so it has a genuine chance to span widely-separated
+    clusters of detections -- capping it at the (much smaller) transverse
+    extent would structurally guarantee it loses a Bayes-factor comparison to
+    multi-bubble models regardless of what the data actually support. Pass
+    `r_max` directly to override this default (e.g. for an explicit
+    physically-motivated cap).
     """
     x_half = pad_factor * np.abs(x).max()
     y_half = pad_factor * np.abs(y).max()
