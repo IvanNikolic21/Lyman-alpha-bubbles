@@ -109,17 +109,60 @@ _PROP_SKIPROWS = 28
 _EW_SENTINEL = -99.0   # "no measurement in this channel" (distinct from a reported limit)
 
 
+def _dedup_by_position(df, sep_arcsec: float = 2.0, dz: float = 0.05):
+    """Cluster rows of `df` (needs `ra`/`dec`/`zspec` columns, degrees) into
+    groups within `sep_arcsec` (great-circle-ish flat-sky approx, fine at
+    sub-arcsec/arcmin scales) and `dz` of each other via union-find. Returns
+    an integer array of length len(df): the row-index of each row's cluster
+    (its own index if it's a singleton or the cluster's first-seen member)."""
+    n = len(df)
+    ra  = df['ra'].to_numpy()
+    dec = df['dec'].to_numpy()
+    z   = df['zspec'].to_numpy()
+
+    parent = list(range(n))
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(a, b):
+        ra_, rb_ = _find(a), _find(b)
+        if ra_ != rb_:
+            parent[ra_] = rb_
+
+    for i in range(n):
+        dra  = (ra[i + 1:] - ra[i]) * np.cos(np.radians(dec[i])) * 3600
+        ddec = (dec[i + 1:] - dec[i]) * 3600
+        sep  = np.hypot(dra, ddec)
+        close = np.where((sep < sep_arcsec) & (np.abs(z[i + 1:] - z[i]) < dz))[0] + (i + 1)
+        for j in close:
+            _union(i, j)
+
+    return np.array([_find(i) for i in range(n)])
+
+
 def load_catalog_v2(lya_path: str, properties_path: str, z_min: float = 5.0,
-                    muv_max: float = 0.0, prefer: str = 'grating') -> CatalogData:
+                    muv_max: float = 0.0, prefer: str = 'grating',
+                    dedup_sep_arcsec: float = 2.0, dedup_dz: float = 0.05) -> CatalogData:
     """Load the two-file CDS catalog (`tb_lya.txt` Lya EW table +
     `sample_nirspec_properties.txt` position/Muv table) and merge into a
     `CatalogData`, replacing the old single-file `table.dat` / `load_catalog`.
 
-    The properties table's `active` flag deduplicates galaxies independently
-    observed under both a SPURS/DIVER id and a JADES/GTO id (verified: e.g.
-    `DIVER-1018968` and `JADES-1166` sit at identical RA/Dec) -- only
-    `active == 1` rows are kept as the canonical galaxy list, matched by id
-    (case-insensitive) into the Lya table for EW.
+    The properties table's `active` flag does NOT reliably mark cross-survey
+    duplicates of the same physical galaxy (checked directly: most
+    `active == 0` rows sit >5" from any `active == 1` row -- i.e. they're
+    real, independent sources, not duplicates -- while at least one
+    `active == 1` pair, e.g. `GO4762-45417`/`JADES-24819`, sits 0.4" apart
+    with near-identical Lya/Muv measurements, i.e. IS a duplicate the flag
+    misses entirely). So `active` is ignored here; duplicates are instead
+    found purely by position (`dedup_sep_arcsec`, default 2") and redshift
+    (`dedup_dz`, default 0.05) matching among ALL properties rows. Within a
+    duplicate cluster, the representative kept is whichever row has the more
+    informative Lya measurement (a detection beats an upper limit beats
+    nothing), tie-broken by the tighter-constrained Muv.
 
     `prefer` picks grating (R~1000) vs prism (R~100) EW when a galaxy has
     both -- grating is used when present and falls back to prism only when
@@ -137,13 +180,46 @@ def load_catalog_v2(lya_path: str, properties_path: str, z_min: float = 5.0,
     df_lya['id_norm']  = df_lya['id'].str.upper().str.strip()
     df_prop['id_norm'] = df_prop['id'].str.upper().str.strip()
 
-    prop_active = df_prop[df_prop['active'] == 1]
-    merged = prop_active.merge(df_lya, on='id_norm', how='inner', suffixes=('', '_lya'))
-    n_unmatched = len(prop_active) - len(merged)
-    if n_unmatched:
-        print(f"[load_catalog_v2] {n_unmatched} active properties rows had no "
-              f"matching Lya-table id and were dropped.", flush=True)
+    merged = df_prop.merge(df_lya, on='id_norm', how='left', suffixes=('', '_lya'))
+    lya_cols = ['ew_grat', 'ew_grat_lo', 'ew_grat_hi', 'ew_grat_lim',
+                'ew_prism', 'ew_prism_lo', 'ew_prism_hi', 'ew_prism_lim',
+                'fesc_grat', 'fesc_grat_lo', 'fesc_grat_hi', 'fesc_grat_lim',
+                'fesc_prism', 'fesc_prism_lo', 'fesc_prism_hi', 'fesc_prism_lim']
+    merged[lya_cols] = merged[lya_cols].fillna(_EW_SENTINEL)   # rows with no id match at all
 
+    has_grat  = merged['ew_grat'].to_numpy() != _EW_SENTINEL
+    has_prism = merged['ew_prism'].to_numpy() != _EW_SENTINEL
+    use_grat  = has_grat if prefer == 'grating' else ~has_prism
+    has_any   = has_grat | has_prism
+
+    ew_lim_pre = np.where(use_grat, merged['ew_grat_lim'], merged['ew_prism_lim']).astype(bool)
+
+    # ── Position+redshift dedup, independent of the (unreliable) `active` flag ──
+    cluster_of = _dedup_by_position(merged, sep_arcsec=dedup_sep_arcsec, dz=dedup_dz)
+    muv_err_pre = merged['muv_lo'].to_numpy() + merged['muv_hi'].to_numpy()
+    # detection (2) > upper limit only (1) > no Lya measurement at all (0);
+    # tie-broken by smaller (tighter) reported Muv error.
+    score = np.where(has_any & ~ew_lim_pre, 2, np.where(has_any, 1, 0))
+    ids_pre = merged['id'].to_numpy()
+    keep_rep = np.zeros(len(merged), dtype=bool)
+    dup_report = []
+    for c in np.unique(cluster_of):
+        members = np.where(cluster_of == c)[0]
+        if len(members) == 1:
+            keep_rep[members[0]] = True
+            continue
+        best = members[np.lexsort((muv_err_pre[members], -score[members]))[0]]
+        keep_rep[best] = True
+        dup_report.append((ids_pre[members].tolist(), ids_pre[best]))
+
+    if dup_report:
+        print(f"[load_catalog_v2] {len(dup_report)} duplicate cluster(s) found by "
+              f"position(<{dedup_sep_arcsec}\")+redshift(|dz|<{dedup_dz}) match "
+              f"(active flag NOT used):", flush=True)
+        for members, kept_id in dup_report:
+            print(f"    {members} -> kept {kept_id!r}", flush=True)
+
+    merged = merged[keep_rep].reset_index(drop=True)
     has_grat  = merged['ew_grat'].to_numpy() != _EW_SENTINEL
     has_prism = merged['ew_prism'].to_numpy() != _EW_SENTINEL
     use_grat  = has_grat if prefer == 'grating' else ~has_prism
@@ -179,7 +255,7 @@ def load_catalog_v2(lya_path: str, properties_path: str, z_min: float = 5.0,
     sane_mask = (zspec > z_min) & (muv < muv_max) & (muv > -90)
     keep_mask = has_any & sane_mask
 
-    print(f"[load_catalog_v2] {n_total} active rows total: "
+    print(f"[load_catalog_v2] {n_total} deduplicated rows total: "
           f"{(~has_any).sum()} dropped (no EW in either channel), "
           f"{(has_any & ~sane_mask).sum()} dropped (sanity filter: "
           f"zspec<={z_min} or muv unphysical), "

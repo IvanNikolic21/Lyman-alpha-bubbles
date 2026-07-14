@@ -3,9 +3,11 @@ Bubble inference on a real EW catalog, likelihood computed directly on
 equivalent width (no spectral flux binning).
 
 Pipeline: load the two-file CDS catalog (`tb_lya.txt` Lya EW table +
-`sample_nirspec_properties.txt` position/Muv table, deduplicated via the
-properties table's `active` flag, grating EW preferred over prism when both
-are present) -> select a redshift window (a single bubble can only plausibly
+`sample_nirspec_properties.txt` position/Muv table, deduplicated by direct
+position+redshift matching -- the properties table's `active` flag does NOT
+reliably mark duplicates, see `load_catalog_v2`'s docstring -- grating EW
+preferred over prism when both are present) -> select a redshift window
+(a single bubble can only plausibly
 explain galaxies in one coeval slice) -> convert RA/Dec/z to comoving Mpc
 centered on the selected sample -> derive the (x, y, z, r_bub) prior box from
 the data extent -> run dynesty with a likelihood that compares
