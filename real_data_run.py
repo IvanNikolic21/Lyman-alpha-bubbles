@@ -190,20 +190,29 @@ def _prior_transform_3bub(u_):
     return p
 
 
-def _tau_now_for_inside(inside_gals, z_end_bub_arr):
+def _tau_now_for_inside(inside_gals, z_end_bub_arr, k_idx=None):
     """Bubble-dependent total tau for the galaxies currently inside a bubble,
-    with the same wavelength-monotonicity sanity fix used in production_run.py."""
+    with the same wavelength-monotonicity sanity fix used in production_run.py.
+
+    `k_idx`: None (default) uses the full n_inside_tau MC-draw axis, as
+    dynesty's logsumexp marginalization needs. An int collapses that axis to
+    the single draw at that index (keeping a length-1 axis) -- used by the
+    SBI simulator (sbi_real_data.py), which pairs each simulation with
+    exactly one fresh stochastic draw rather than marginalizing over many."""
     s = _S
+    def _k(arr):
+        return arr if k_idx is None else arr[:, [k_idx]]
+
     tau_post_in = calculate_taus_post_batched(
         s.redshifts[inside_gals], z_end_bub_arr[inside_gals],
-        s.z_up[inside_gals].copy(), s.red_up[inside_gals],
-        s.z_lo[inside_gals].copy(), s.red_lo[inside_gals],
+        _k(s.z_up[inside_gals]).copy(), _k(s.red_up[inside_gals]),
+        _k(s.z_lo[inside_gals]).copy(), _k(s.red_lo[inside_gals]),
         z_per_gal=s.z_wv[inside_gals],
         tau_wv_pref_per_gal=s.tau_wv_pref[inside_gals],
         I_z_end_per_gal=s.I_z_end[inside_gals],
-        I_red_up_all=s.I_red_up[inside_gals],
+        I_red_up_all=_k(s.I_red_up[inside_gals]),
     )
-    tau_now = s.tau_prec[inside_gals] + tau_post_in
+    tau_now = _k(s.tau_prec[inside_gals]) + tau_post_in
     bad = np.any(tau_now[:, :, 30:] - tau_now[:, :, 29:-1] > 0, axis=2)
     if np.any(bad):
         for _ii, g in enumerate(inside_gals):
@@ -218,28 +227,34 @@ def _tau_now_for_inside(inside_gals, z_end_bub_arr):
     return np.nan_to_num(tau_now, nan=np.inf)
 
 
-def _ew_and_t_for_inside(inside_gals, tau_now):
+def _ew_and_t_for_inside(inside_gals, tau_now, k_idx=None):
     """Model-predicted EW *and* transmission fraction `t_in` for the galaxies
     currently inside a bubble. `t_in` is the line-profile-weighted CGM+IGM
     transmission -- it's the model's prediction for escape fraction, used by
-    `_fesc_log_weights` below."""
+    `_fesc_log_weights` below. `k_idx`: see `_tau_now_for_inside`."""
     s = _S
-    weighted  = s.j_s[inside_gals] * s.tau_cgm[inside_gals][:, np.newaxis, :] * np.exp(-tau_now)
-    numerator = np.trapz(weighted, wave_em.value, axis=2)
-    t_in      = numerator / s.j_s_trapz_denom[inside_gals]
-    return s.ew_int[inside_gals] * t_in, t_in
+    j_s_i           = s.j_s[inside_gals] if k_idx is None else s.j_s[inside_gals][:, [k_idx]]
+    weighted        = j_s_i * s.tau_cgm[inside_gals][:, np.newaxis, :] * np.exp(-tau_now)
+    numerator       = np.trapz(weighted, wave_em.value, axis=2)
+    j_s_trapz_denom = s.j_s_trapz_denom[inside_gals] if k_idx is None else s.j_s_trapz_denom[inside_gals][:, [k_idx]]
+    t_in            = numerator / j_s_trapz_denom
+    ew_int_i        = s.ew_int[inside_gals] if k_idx is None else s.ew_int[inside_gals][:, [k_idx]]
+    return ew_int_i * t_in, t_in
 
 
-def _build_predictions(inside_gals, z_end_bub_arr):
+def _build_predictions(inside_gals, z_end_bub_arr, k_idx=None):
     """(n_gal, K) predicted EW and predicted transmission (== predicted fesc),
     starting from the theta-independent "outside any bubble" baseline and
-    overwriting galaxies currently inside a bubble."""
+    overwriting galaxies currently inside a bubble. `k_idx`: see
+    `_tau_now_for_inside` -- when given, the returned arrays are (n_gal, 1)
+    rather than (n_gal, n_inside_tau); callers that want a flat (n_gal,)
+    vector (e.g. the SBI simulator) should `.squeeze(axis=1)` the result."""
     s = _S
-    ew_pred = s.ew_pred_outside.copy()
-    t_pred  = s.t_outside.copy()
+    ew_pred = (s.ew_pred_outside if k_idx is None else s.ew_pred_outside[:, [k_idx]]).copy()
+    t_pred  = (s.t_outside if k_idx is None else s.t_outside[:, [k_idx]]).copy()
     if len(inside_gals) > 0:
-        tau_now = _tau_now_for_inside(inside_gals, z_end_bub_arr)
-        ew_pred[inside_gals], t_pred[inside_gals] = _ew_and_t_for_inside(inside_gals, tau_now)
+        tau_now = _tau_now_for_inside(inside_gals, z_end_bub_arr, k_idx=k_idx)
+        ew_pred[inside_gals], t_pred[inside_gals] = _ew_and_t_for_inside(inside_gals, tau_now, k_idx=k_idx)
     return ew_pred, t_pred
 
 
@@ -314,17 +329,59 @@ def _ew_loglike_from_pred(ew_pred, t_pred):
     return float(per_gal.sum())
 
 
-def _log_likelihood_ew(theta, _return_t_pred=False):
+def _inside_and_z_end(theta, n_bub):
+    """(inside_gals, z_end_bub_arr) for a `theta` with `n_bub` bubbles --
+    the geometry shared by `_log_likelihood_ew`/`_2bub`/`_3bub` below and by
+    any external caller needing "which galaxies are inside which bubble, and
+    at what near-face redshift" for a given theta (e.g. the SBI simulator in
+    sbi_real_data.py). A galaxy inside more than one bubble uses whichever
+    near face is closer to the observer (lower redshift -> lower tau_IGM to
+    the observer)."""
     s = _S
-    xb, yb, zb, rb = theta
-    dx = s.x_gal - xb
-    dy = s.y_gal - yb
-    dz = s.z_gal - zb
-    inside        = dx**2 + dy**2 + dz**2 < rb**2
-    dist_arr      = np.where(inside, dz + np.sqrt(np.where(inside, rb**2 - dx**2 - dy**2, 0.0)), 0.0)
-    z_end_bub_arr = s.redshifts - np.where(inside, dist_arr / s.R_H, 0.0)
-    inside_gals   = np.where(inside)[0]
+    if n_bub == 1:
+        xb, yb, zb, rb = theta
+        dx = s.x_gal - xb
+        dy = s.y_gal - yb
+        dz = s.z_gal - zb
+        inside        = dx**2 + dy**2 + dz**2 < rb**2
+        dist_arr      = np.where(inside, dz + np.sqrt(np.where(inside, rb**2 - dx**2 - dy**2, 0.0)), 0.0)
+        z_end_bub_arr = s.redshifts - np.where(inside, dist_arr / s.R_H, 0.0)
+    elif n_bub == 2:
+        x1, y1, z1, r1, x2, y2, z2, r2 = theta
+        dx1 = s.x_gal - x1;  dy1 = s.y_gal - y1;  dz1 = s.z_gal - z1
+        dx2 = s.x_gal - x2;  dy2 = s.y_gal - y2;  dz2 = s.z_gal - z2
+        in1 = dx1**2 + dy1**2 + dz1**2 < r1**2
+        in2 = dx2**2 + dy2**2 + dz2**2 < r2**2
+        inside = in1 | in2
+        dist1 = dz1 + np.sqrt(np.maximum(r1**2 - dx1**2 - dy1**2, 0.0))
+        dist2 = dz2 + np.sqrt(np.maximum(r2**2 - dx2**2 - dy2**2, 0.0))
+        z_end1 = np.where(in1, s.redshifts - dist1 / s.R_H, np.inf)
+        z_end2 = np.where(in2, s.redshifts - dist2 / s.R_H, np.inf)
+        z_end_bub_arr = np.minimum(z_end1, z_end2)
+    elif n_bub == 3:
+        x1, y1, z1, r1, x2, y2, z2, r2, x3, y3, z3, r3 = theta
+        dx1 = s.x_gal - x1;  dy1 = s.y_gal - y1;  dz1 = s.z_gal - z1
+        dx2 = s.x_gal - x2;  dy2 = s.y_gal - y2;  dz2 = s.z_gal - z2
+        dx3 = s.x_gal - x3;  dy3 = s.y_gal - y3;  dz3 = s.z_gal - z3
+        in1 = dx1**2 + dy1**2 + dz1**2 < r1**2
+        in2 = dx2**2 + dy2**2 + dz2**2 < r2**2
+        in3 = dx3**2 + dy3**2 + dz3**2 < r3**2
+        inside = in1 | in2 | in3
+        dist1 = dz1 + np.sqrt(np.maximum(r1**2 - dx1**2 - dy1**2, 0.0))
+        dist2 = dz2 + np.sqrt(np.maximum(r2**2 - dx2**2 - dy2**2, 0.0))
+        dist3 = dz3 + np.sqrt(np.maximum(r3**2 - dx3**2 - dy3**2, 0.0))
+        z_end1 = np.where(in1, s.redshifts - dist1 / s.R_H, np.inf)
+        z_end2 = np.where(in2, s.redshifts - dist2 / s.R_H, np.inf)
+        z_end3 = np.where(in3, s.redshifts - dist3 / s.R_H, np.inf)
+        z_end_bub_arr = np.minimum(np.minimum(z_end1, z_end2), z_end3)
+    else:
+        raise ValueError(f"n_bub must be 1, 2, or 3, got {n_bub}")
+    inside_gals = np.where(inside)[0]
+    return inside_gals, z_end_bub_arr
 
+
+def _log_likelihood_ew(theta, _return_t_pred=False):
+    inside_gals, z_end_bub_arr = _inside_and_z_end(theta, 1)
     ew_pred, t_pred = _build_predictions(inside_gals, z_end_bub_arr)
     if _return_t_pred:
         return ew_pred, t_pred
@@ -332,29 +389,7 @@ def _log_likelihood_ew(theta, _return_t_pred=False):
 
 
 def _log_likelihood_ew_2bub(theta, _return_t_pred=False):
-    s = _S
-    x1, y1, z1, r1, x2, y2, z2, r2 = theta
-
-    dx1 = s.x_gal - x1;  dy1 = s.y_gal - y1;  dz1 = s.z_gal - z1
-    dx2 = s.x_gal - x2;  dy2 = s.y_gal - y2;  dz2 = s.z_gal - z2
-
-    in1 = dx1**2 + dy1**2 + dz1**2 < r1**2
-    in2 = dx2**2 + dy2**2 + dz2**2 < r2**2
-    inside = in1 | in2
-
-    dist1 = dz1 + np.sqrt(np.maximum(r1**2 - dx1**2 - dy1**2, 0.0))
-    dist2 = dz2 + np.sqrt(np.maximum(r2**2 - dx2**2 - dy2**2, 0.0))
-
-    # Near-face redshift per bubble; inf for galaxies not inside that bubble.
-    z_end1 = np.where(in1, s.redshifts - dist1 / s.R_H, np.inf)
-    z_end2 = np.where(in2, s.redshifts - dist2 / s.R_H, np.inf)
-
-    # Galaxy inside both bubbles: take whichever near face is closer to the
-    # observer (lower redshift -> lower tau_IGM to observer).
-    z_end_bub_arr = np.minimum(z_end1, z_end2)
-
-    inside_gals = np.where(inside)[0]
-
+    inside_gals, z_end_bub_arr = _inside_and_z_end(theta, 2)
     ew_pred, t_pred = _build_predictions(inside_gals, z_end_bub_arr)
     if _return_t_pred:
         return ew_pred, t_pred
@@ -362,50 +397,30 @@ def _log_likelihood_ew_2bub(theta, _return_t_pred=False):
 
 
 def _log_likelihood_ew_3bub(theta, _return_t_pred=False):
-    s = _S
-    x1, y1, z1, r1, x2, y2, z2, r2, x3, y3, z3, r3 = theta
-
-    dx1 = s.x_gal - x1;  dy1 = s.y_gal - y1;  dz1 = s.z_gal - z1
-    dx2 = s.x_gal - x2;  dy2 = s.y_gal - y2;  dz2 = s.z_gal - z2
-    dx3 = s.x_gal - x3;  dy3 = s.y_gal - y3;  dz3 = s.z_gal - z3
-
-    in1 = dx1**2 + dy1**2 + dz1**2 < r1**2
-    in2 = dx2**2 + dy2**2 + dz2**2 < r2**2
-    in3 = dx3**2 + dy3**2 + dz3**2 < r3**2
-    inside = in1 | in2 | in3
-
-    dist1 = dz1 + np.sqrt(np.maximum(r1**2 - dx1**2 - dy1**2, 0.0))
-    dist2 = dz2 + np.sqrt(np.maximum(r2**2 - dx2**2 - dy2**2, 0.0))
-    dist3 = dz3 + np.sqrt(np.maximum(r3**2 - dx3**2 - dy3**2, 0.0))
-
-    z_end1 = np.where(in1, s.redshifts - dist1 / s.R_H, np.inf)
-    z_end2 = np.where(in2, s.redshifts - dist2 / s.R_H, np.inf)
-    z_end3 = np.where(in3, s.redshifts - dist3 / s.R_H, np.inf)
-
-    # Galaxy inside multiple bubbles: take whichever near face is closer to
-    # the observer (lower redshift -> lower tau_IGM to observer).
-    z_end_bub_arr = np.minimum(np.minimum(z_end1, z_end2), z_end3)
-
-    inside_gals = np.where(inside)[0]
-
+    inside_gals, z_end_bub_arr = _inside_and_z_end(theta, 3)
     ew_pred, t_pred = _build_predictions(inside_gals, z_end_bub_arr)
     if _return_t_pred:
         return ew_pred, t_pred
     return _ew_loglike_from_pred(ew_pred, t_pred)
 
 
-def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
-                n_inside_tau: int, z_min: float, muv_max: float, main_dir: str,
-                r_max: float = None, prefer: str = 'grating',
-                legacy_catalog_path: str = None) -> dict:
-    """Load the catalog, select the redshift window, convert coordinates,
-    build the data-driven prior, and populate `_S` with everything the
-    likelihood needs. Returns the (x, y, z, prior_lo, prior_hi, ra0, dec0, z0)
-    metadata needed to interpret/rerun the fit.
+def _load_catalog_and_priors(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
+                             z_min: float, muv_max: float, main_dir: str,
+                             r_max: float = None, prefer: str = 'grating',
+                             legacy_catalog_path: str = None) -> dict:
+    """Catalog loading, z-window selection, coordinate transform, and prior
+    box -- everything theta- and MC-draw-independent. Populates the
+    catalog-fixed `_S` fields and returns what `_refresh_mc_state` needs
+    (`muv`/`beta`/`redshifts`/`x_gal`/`y_gal`/`z_gal`/`z0`) plus the same
+    metadata `build_state` has always returned. Split out of `build_state` so
+    the catalog only needs loading once while the stochastic forward-model
+    draw (`_refresh_mc_state`) can be repeated cheaply -- needed by the SBI
+    simulator (sbi_real_data.py), which wants many independent single-draw
+    realizations rather than one large marginalization pool.
 
     By default loads the two-file CDS catalog (`tb_lya.txt` Lya EW table +
-    `sample_nirspec_properties.txt` position/Muv table, deduplicated via the
-    properties table's `active` flag). Pass `legacy_catalog_path` to instead
+    `sample_nirspec_properties.txt` position/Muv table, deduplicated via
+    direct position+redshift matching). Pass `legacy_catalog_path` to instead
     reproduce an old run against the single-file `table.dat` format."""
     if legacy_catalog_path is not None:
         cat = load_catalog(legacy_catalog_path, z_min=z_min, muv_max=muv_max)
@@ -455,6 +470,57 @@ def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
     print(f"[build_state] {is_ul.sum()} upper limits, {(~is_ul).sum()} detections "
           f"in this window.", flush=True)
 
+    R_H     = np.array([(const.c / Cosmo.H(redshifts[i])).to(u.Mpc).value for i in range(n_gal)])
+    tau_cgm = np.array([tau_CGM(muv[i], main_dir=main_dir) for i in range(n_gal)])   # deterministic given Muv
+
+    r_alpha_val = 6.25e8 / (4 * np.pi * (const.c / wave_Lya).to(u.Hz).value)
+    tau_gp      = 7.16e5 * ((1 + redshifts) / 10) ** 1.5
+    tau_wv_pref = tau_gp * r_alpha_val / np.pi * 0.65
+    z_wv        = wave_em.value[np.newaxis, :] / 1216 * (1 + redshifts[:, np.newaxis]) - 1
+    I_z_end     = I((1 + 5.3) / (1 + z_wv))
+
+    _S.x_gal           = x_gal
+    _S.y_gal           = y_gal
+    _S.z_gal           = z_gal
+    _S.redshifts       = redshifts
+    _S.R_H             = R_H
+    _S.tau_cgm         = tau_cgm
+    _S.z_wv            = z_wv
+    _S.tau_wv_pref     = tau_wv_pref
+    _S.I_z_end         = I_z_end
+    _S.ew_obs              = ew_obs
+    _S.ew_err              = np.where(is_ul, 1.0, ew_err)   # placeholder for unused branch
+    _S.is_upper_limit      = is_ul
+    _S.fesc_obs            = fesc_obs
+    _S.fesc_err            = np.where(fesc_has, fesc_err, 1.0)   # placeholder, unused where fesc_has is False
+    _S.fesc_is_upper_limit = fesc_is_ul
+    _S.fesc_has            = fesc_has
+    _S.prior_lo        = prior_lo
+    _S.prior_hi        = prior_hi
+
+    return dict(
+        n_gal=n_gal, ra0=ra0, dec0=dec0, z0=z0,
+        x_mean=x_mean, y_mean=y_mean, z_mean=z_mean,
+        prior_lo=prior_lo, prior_hi=prior_hi,
+        x_gal=x_gal, y_gal=y_gal, z_gal=z_gal, redshifts=redshifts,
+        muv=muv, beta=beta,
+        ew_obs=ew_obs, ew_err=ew_err, is_upper_limit=is_ul,
+        fesc_obs=fesc_obs, fesc_err=fesc_err, fesc_is_upper_limit=fesc_is_ul,
+        fesc_has_measurement=fesc_has,
+    )
+
+
+def _refresh_mc_state(muv, redshifts, x_gal, y_gal, z_gal, beta, z0,
+                      n_inside_tau: int, main_dir: str) -> None:
+    """Draw a fresh batch of `n_inside_tau` stochastic MC realizations (line
+    profile, intrinsic EW, outside-bubble sightline) via `get_content`, and
+    populate the MC-draw-dependent `_S` fields. Call once (large
+    `n_inside_tau`) for dynesty's marginalization pool; call repeatedly
+    (small/1 `n_inside_tau`) for SBI's bulk simulation generation
+    (sbi_real_data.py) -- each call is an independent fresh draw. Requires
+    `_load_catalog_and_priors` to have already populated the catalog-fixed
+    `_S` fields this reads (`tau_cgm`, `z_wv`, `tau_wv_pref`, `I_z_end`)."""
+    n_gal = len(muv)
     cont_filled = get_content(
         muv, redshifts, x_gal, y_gal, z_gal,
         beta=beta, n_iter_bub=N_ITER_BUB, n_inside_tau=n_inside_tau,
@@ -464,16 +530,9 @@ def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
         main_dir=main_dir, cache_dir=None, gauss_distr=False,
     )
 
-    R_H      = np.array([(const.c / Cosmo.H(redshifts[i])).to(u.Mpc).value for i in range(n_gal)])
-    tau_cgm  = np.array([tau_CGM(muv[i], main_dir=main_dir) for i in range(n_gal)])
     j_s      = np.array([cont_filled.j_s_full[i] for i in range(n_gal)])
     la_flux  = np.array([cont_filled.la_flux_out_full[i] for i in range(n_gal)])
 
-    r_alpha_val = 6.25e8 / (4 * np.pi * (const.c / wave_Lya).to(u.Hz).value)
-    tau_gp      = 7.16e5 * ((1 + redshifts) / 10) ** 1.5
-    tau_wv_pref = tau_gp * r_alpha_val / np.pi * 0.65
-    z_wv        = wave_em.value[np.newaxis, :] / 1216 * (1 + redshifts[:, np.newaxis]) - 1
-    I_z_end     = I((1 + 5.3) / (1 + z_wv))
     ooz         = 1215.67 / (wave_em.value[np.newaxis, :] * (1 + redshifts[:, np.newaxis]))
     red_up_arr  = np.array([cont_filled.first_bubble_encounter_redshift_up_full[i] for i in range(n_gal)])
     I_red_up    = I((1 + red_up_arr[:, :, np.newaxis]) * ooz[:, np.newaxis, :])
@@ -494,15 +553,15 @@ def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
     # ── Baseline ("outside any bubble") tau and EW prediction, theta-independent ──
     tau_post_out = calculate_taus_post_batched(
         redshifts, redshifts, z_up.copy(), red_up, z_lo.copy(), red_lo,
-        z_per_gal=z_wv, tau_wv_pref_per_gal=tau_wv_pref,
-        I_z_end_per_gal=I_z_end, I_red_up_all=I_red_up,
+        z_per_gal=_S.z_wv, tau_wv_pref_per_gal=_S.tau_wv_pref,
+        I_z_end_per_gal=_S.I_z_end, I_red_up_all=I_red_up,
     )
     tau_out = tau_post_out.copy()
     bad_out = np.any(tau_out[:, :, 30:] - tau_out[:, :, 29:-1] > 0, axis=2)
     for _g in np.where(np.any(bad_out, axis=1))[0]:
-        _ratio = (1 + redshifts[_g]) / (1 + z_wv[_g])
+        _ratio = (1 + redshifts[_g]) / (1 + _S.z_wv[_g])
         tau_out[_g, bad_out[_g]] = np.clip(
-            tau_wv_pref[_g] * _ratio**1.5 * (I(_ratio) - I_z_end[_g]), 0, np.inf,
+            _S.tau_wv_pref[_g] * _ratio**1.5 * (I(_ratio) - _S.I_z_end[_g]), 0, np.inf,
         )
     tau_out[tau_out < 0] = np.inf
     tau_out = np.nan_to_num(tau_out, nan=np.inf)
@@ -517,56 +576,50 @@ def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
     ew_int     = la_flux / (c_const[:, np.newaxis] * l_uv_mean[:, np.newaxis])
 
     j_s_trapz_denom   = np.trapz(j_s, wave_em.value, axis=2)
-    weighted_outside  = j_s * tau_cgm[:, np.newaxis, :] * np.exp(-tau_total_outside)
+    weighted_outside  = j_s * _S.tau_cgm[:, np.newaxis, :] * np.exp(-tau_total_outside)
     numerator_outside = np.trapz(weighted_outside, wave_em.value, axis=2)
     t_outside         = numerator_outside / j_s_trapz_denom
     ew_pred_outside   = ew_int * t_outside
 
-    _S.x_gal           = x_gal
-    _S.y_gal           = y_gal
-    _S.z_gal           = z_gal
-    _S.redshifts       = redshifts
-    _S.R_H             = R_H
     _S.tau_prec        = tau_prec
     _S.z_up            = z_up
     _S.red_up          = red_up
     _S.z_lo            = z_lo
     _S.red_lo          = red_lo
-    _S.z_wv            = z_wv
-    _S.tau_wv_pref     = tau_wv_pref
-    _S.I_z_end         = I_z_end
     _S.I_red_up        = I_red_up
     _S.j_s             = j_s
-    _S.tau_cgm         = tau_cgm
     _S.j_s_trapz_denom = j_s_trapz_denom
-    _S.ew_int              = ew_int
-    _S.ew_pred_outside     = ew_pred_outside
-    _S.t_outside           = t_outside
-    _S.ew_obs              = ew_obs
-    _S.ew_err              = np.where(is_ul, 1.0, ew_err)   # placeholder for unused branch
-    _S.is_upper_limit      = is_ul
-    _S.fesc_obs            = fesc_obs
-    _S.fesc_err            = np.where(fesc_has, fesc_err, 1.0)   # placeholder, unused where fesc_has is False
-    _S.fesc_is_upper_limit = fesc_is_ul
-    _S.fesc_has            = fesc_has
-    _S.n_inside_tau        = n_inside_tau
-    _S.prior_lo        = prior_lo
-    _S.prior_hi        = prior_hi
+    _S.ew_int          = ew_int
+    _S.ew_pred_outside = ew_pred_outside
+    _S.t_outside       = t_outside
+    _S.n_inside_tau    = n_inside_tau
 
-    print(f"[build_state] fesc reweighting: {fesc_has.sum()} of {n_gal} galaxies have "
+    print(f"[build_state] fesc reweighting: {_S.fesc_has.sum()} of {n_gal} galaxies have "
           f"a fesc measurement to reweight the EW marginalization "
           f"(sigma x{FESC_SIGMA_MULT} for detections, fixed scale {FESC_UL_SCALE} for limits).",
           flush=True)
 
-    return dict(
-        n_gal=n_gal, ra0=ra0, dec0=dec0, z0=z0,
-        x_mean=x_mean, y_mean=y_mean, z_mean=z_mean,
-        prior_lo=prior_lo, prior_hi=prior_hi,
-        x_gal=x_gal, y_gal=y_gal, z_gal=z_gal, redshifts=redshifts,
-        ew_obs=ew_obs, ew_err=ew_err, is_upper_limit=is_ul,
-        fesc_obs=fesc_obs, fesc_err=fesc_err, fesc_is_upper_limit=fesc_is_ul,
-        fesc_has_measurement=fesc_has,
+
+def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
+                n_inside_tau: int, z_min: float, muv_max: float, main_dir: str,
+                r_max: float = None, prefer: str = 'grating',
+                legacy_catalog_path: str = None) -> dict:
+    """Load the catalog, select the redshift window, convert coordinates,
+    build the data-driven prior, and populate `_S` with everything the
+    likelihood needs. Returns the (x, y, z, prior_lo, prior_hi, ra0, dec0, z0)
+    metadata needed to interpret/rerun the fit. Thin wrapper around
+    `_load_catalog_and_priors` + `_refresh_mc_state` (kept separate so the
+    SBI simulator can call the catalog-loading part once and the stochastic
+    MC-draw part many times -- see both functions' docstrings)."""
+    meta = _load_catalog_and_priors(
+        lya_path, properties_path, z_lo, z_hi, z_min, muv_max, main_dir,
+        r_max=r_max, prefer=prefer, legacy_catalog_path=legacy_catalog_path,
     )
+    _refresh_mc_state(
+        meta['muv'], meta['redshifts'], meta['x_gal'], meta['y_gal'], meta['z_gal'],
+        meta['beta'], meta['z0'], n_inside_tau, main_dir,
+    )
+    return meta
 
 
 def _run_dynesty(loglike, prior_transform, ndim, param_names,

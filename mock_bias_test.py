@@ -42,82 +42,16 @@ MIN_INSIDE = 2
 
 # ── Per-model EW prediction (truth-forward pass) ────────────────────────────
 
-def _ew_pred_truth_1bub(theta):
-    """ew_pred (n_gal, K) for a 1-bubble truth theta."""
-    s = rdr._S
-    xb, yb, zb, rb = theta
-    dx = s.x_gal - xb
-    dy = s.y_gal - yb
-    dz = s.z_gal - zb
-    inside       = dx**2 + dy**2 + dz**2 < rb**2
-    dist_arr     = np.where(inside, dz + np.sqrt(np.where(inside, rb**2 - dx**2 - dy**2, 0.0)), 0.0)
-    z_end        = s.redshifts - np.where(inside, dist_arr / s.R_H, 0.0)
-    inside_gals  = np.where(inside)[0]
-
-    ew_pred = s.ew_pred_outside.copy()
-    if len(inside_gals):
-        tau_now = rdr._tau_now_for_inside(inside_gals, z_end)
-        ew_pred[inside_gals] = rdr._ew_pred_for_inside(inside_gals, tau_now)
-    return ew_pred, inside
+def _ew_pred_truth(theta, n_bub):
+    """ew_pred (n_gal, K) and the inside-bubble galaxy indices for a truth
+    theta with `n_bub` bubbles. Reuses real_data_run.py's own geometry
+    (`_inside_and_z_end`) and prediction (`_build_predictions`) helpers
+    directly, rather than re-deriving them here."""
+    inside_gals, z_end_bub_arr = rdr._inside_and_z_end(theta, n_bub)
+    ew_pred, _ = rdr._build_predictions(inside_gals, z_end_bub_arr)
+    return ew_pred, inside_gals
 
 
-def _ew_pred_truth_2bub(theta):
-    """ew_pred (n_gal, K) for a 2-bubble truth theta."""
-    s = rdr._S
-    x1, y1, z1, r1, x2, y2, z2, r2 = theta
-    dx1 = s.x_gal - x1;  dy1 = s.y_gal - y1;  dz1 = s.z_gal - z1
-    dx2 = s.x_gal - x2;  dy2 = s.y_gal - y2;  dz2 = s.z_gal - z2
-    in1 = dx1**2 + dy1**2 + dz1**2 < r1**2
-    in2 = dx2**2 + dy2**2 + dz2**2 < r2**2
-    inside = in1 | in2
-
-    dist1  = dz1 + np.sqrt(np.maximum(r1**2 - dx1**2 - dy1**2, 0.0))
-    dist2  = dz2 + np.sqrt(np.maximum(r2**2 - dx2**2 - dy2**2, 0.0))
-    z_end1 = np.where(in1, s.redshifts - dist1 / s.R_H, np.inf)
-    z_end2 = np.where(in2, s.redshifts - dist2 / s.R_H, np.inf)
-    z_end  = np.minimum(z_end1, z_end2)
-    inside_gals = np.where(inside)[0]
-
-    ew_pred = s.ew_pred_outside.copy()
-    if len(inside_gals):
-        tau_now = rdr._tau_now_for_inside(inside_gals, z_end)
-        ew_pred[inside_gals] = rdr._ew_pred_for_inside(inside_gals, tau_now)
-    return ew_pred, inside
-
-
-def _ew_pred_truth_3bub(theta):
-    """ew_pred (n_gal, K) for a 3-bubble truth theta."""
-    s = rdr._S
-    x1, y1, z1, r1, x2, y2, z2, r2, x3, y3, z3, r3 = theta
-    dx1 = s.x_gal - x1;  dy1 = s.y_gal - y1;  dz1 = s.z_gal - z1
-    dx2 = s.x_gal - x2;  dy2 = s.y_gal - y2;  dz2 = s.z_gal - z2
-    dx3 = s.x_gal - x3;  dy3 = s.y_gal - y3;  dz3 = s.z_gal - z3
-    in1 = dx1**2 + dy1**2 + dz1**2 < r1**2
-    in2 = dx2**2 + dy2**2 + dz2**2 < r2**2
-    in3 = dx3**2 + dy3**2 + dz3**2 < r3**2
-    inside = in1 | in2 | in3
-
-    dist1  = dz1 + np.sqrt(np.maximum(r1**2 - dx1**2 - dy1**2, 0.0))
-    dist2  = dz2 + np.sqrt(np.maximum(r2**2 - dx2**2 - dy2**2, 0.0))
-    dist3  = dz3 + np.sqrt(np.maximum(r3**2 - dx3**2 - dy3**2, 0.0))
-    z_end1 = np.where(in1, s.redshifts - dist1 / s.R_H, np.inf)
-    z_end2 = np.where(in2, s.redshifts - dist2 / s.R_H, np.inf)
-    z_end3 = np.where(in3, s.redshifts - dist3 / s.R_H, np.inf)
-    z_end  = np.minimum(np.minimum(z_end1, z_end2), z_end3)
-    inside_gals = np.where(inside)[0]
-
-    ew_pred = s.ew_pred_outside.copy()
-    if len(inside_gals):
-        tau_now = rdr._tau_now_for_inside(inside_gals, z_end)
-        ew_pred[inside_gals] = rdr._ew_pred_for_inside(inside_gals, tau_now)
-    return ew_pred, inside
-
-
-_EW_PRED_FUNCS = {
-    1: _ew_pred_truth_1bub,
-    2: _ew_pred_truth_2bub,
-    3: _ew_pred_truth_3bub,
-}
 _PRIOR_TRANSFORMS = {
     1: rdr._prior_transform,
     2: rdr._prior_transform_2bub,
@@ -153,13 +87,12 @@ def generate_mock_ew(theta_truth, n_bub, rng):
     n_inside    : int       galaxies inside the truth bubble(s)
     n_lae_inside: int       inside galaxies with sampled ew_int > 0 (actual LAEs)
     """
-    ew_pred_mock, inside_mask = _EW_PRED_FUNCS[n_bub](theta_truth)  # (n_gal, K)
+    ew_pred_mock, inside_gals = _ew_pred_truth(theta_truth, n_bub)  # (n_gal, K), (n_inside,)
     k = rng.integers(ew_pred_mock.shape[1])
     ew_obs  = ew_pred_mock[:, k]
     ew_err  = np.maximum(ew_pred_mock.std(axis=1), EW_ERR_FLOOR)
-    inside_gals = np.where(inside_mask)[0]
     n_lae_inside = int((ew_obs[inside_gals] > 0).sum())
-    return ew_obs, ew_err, int(inside_mask.sum()), n_lae_inside
+    return ew_obs, ew_err, len(inside_gals), n_lae_inside
 
 
 def _sample_truth(n_bub, rng):
