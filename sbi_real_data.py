@@ -24,16 +24,36 @@ status is stochastic and theta-dependent (see `_build_x`): a galaxy that's a
 real non-detection CAN appear as a simulated detection if theta boosts its
 predicted EW past its own catalog-implied 3-sigma threshold, and vice versa.
 
+IMPORTANT caveat on the correlation claim above, found by an independent
+review (Fable) and fixed via `lyabubbles/lightcone_field.py`: the original
+version of this simulator drew each galaxy's "beyond the fitted bubble" IGM
+structure independently (via `get_content`'s per-galaxy `get_xH`/`get_bubbles`
+calls), so the true generative model factorized exactly like the old dynesty
+likelihood -- no galaxy-galaxy correlation beyond what's mediated by the
+shared fitted bubble. `_compute_lightcone_tau_batch` (below) fixes this for
+the *near-source* part of each sightline by ray-tracing every galaxy through
+one shared, real 21cmFAST snapshot per simulation (with the fitted bubble(s)
+carved in) instead -- bounded to one box-length (384 cMpc) near the source,
+by deliberate choice; the analytic tail beyond that (folded into the same ray
+trace via `x_h_tail`) is still a uniform approximation, not sourced from the
+shared field. See the plan doc for the full reasoning and the tradeoffs of
+that scope choice.
+
 Reuses `real_data_run.py`'s physics/state machinery directly: `_S`
 (module-level shared state, fork-inherited by worker processes),
 `_load_catalog_and_priors`/`_refresh_mc_state` (the `build_state` split --
-catalog loaded once, MC draws refreshed per simulation batch),
-`_inside_and_z_end`/`_build_predictions` (theta-dependent geometry/EW
-prediction), `_prior_transform`/`_prior_transform_2bub`/`_prior_transform_3bub`
-(now the simulation-informed bubble-size prior, unchanged by this file).
+catalog loaded once, MC draws refreshed per simulation batch; still used
+here for `j_s`/`ew_int`/`tau_cgm`, NOT for the old `tau_prec`/`z_up`/etc.
+"outside bubble" fields, which this file no longer reads),
+`_inside_and_z_end` (theta-dependent geometry -- who's inside which bubble,
+used by `_compute_lightcone_tau_batch` to carve the bubble(s) into the
+lightcone), `_prior_transform`/`_prior_transform_2bub`/`_prior_transform_3bub`
+(the simulation-informed bubble-size prior, unchanged by this file).
+`real_data_run.py`/`speed_up.py`/`get_content` themselves are NOT modified.
 
 Requires `torch`/`sbi` (see requirements-sbi.txt) ONLY for the `train`/`infer`
-subcommands -- `simulate` needs neither, just the existing physics stack.
+subcommands -- `simulate` needs neither, just the existing physics stack
+(plus `h5py` for the 21cmFAST snapshot files, already a base dependency).
 
 Usage
 -----
@@ -55,8 +75,12 @@ import argparse
 import multiprocessing as mp
 import numpy as np
 from scipy.stats import exponnorm
+from astropy.cosmology import Planck18 as Cosmo
+import astropy.units as u
 
 import real_data_run as rdr
+from lyabubbles.igm_prop import get_xH
+from lyabubbles import lightcone_field as lf
 
 _N_BUB_TO_NDIM = {1: rdr.NDIM, 2: rdr.NDIM_2BUB, 3: rdr.NDIM_3BUB}
 _N_BUB_TO_PRIOR_TRANSFORM = {1: rdr._prior_transform, 2: rdr._prior_transform_2bub,
@@ -115,12 +139,106 @@ def _build_x_obs():
     return _pack_x(s.ew_obs, s.is_upper_limit)
 
 
-def simulate_one(theta, k_idx, n_bub, rng):
+def _theta_to_spheres(theta, n_bub):
+    """theta (length 4*n_bub) -> list of (x, y, z, r) tuples, same centered
+    comoving-Mpc frame as `_S.x_gal/y_gal/z_gal` -- theta is already
+    parametrized in this frame (see `_prior_transform`/`_inside_and_z_end`)."""
+    theta = np.asarray(theta)
+    return [tuple(theta[4 * i:4 * i + 4]) for i in range(n_bub)]
+
+
+# ── Shared 21cmFAST lightcone: replaces get_content's per-galaxy-independent
+#    "outside bubble" draw with a real reionization field, shared across every
+#    galaxy within one simulation and ray-traced per sightline -- see
+#    .claude/plans/bright-growing-goblet.md for the full design. Runs entirely
+#    in the PARENT process (per the chosen "simplicity over parallelism"
+#    architecture), so the fork pool below only ever does the cheap
+#    noise-injection step, as before. `get_content`/`_refresh_mc_state`
+#    (speed_up.py/real_data_run.py) are untouched -- still called for
+#    `j_s`/`ew_int`/etc.; their `tau_prec`/`z_up`/`red_up`/`z_lo`/`red_lo`
+#    outputs are simply not used by this path. ──────────────────────────────
+
+_SNAPSHOT_FIELD_CACHE = {}   # path -> (256,256,256) float32 array, module-level,
+                             # persists across batches/splits within one process
+                             # (only 13 distinct snapshots exist -- ~800 MiB worst case)
+
+
+def _load_snapshot_cached(path):
+    field = _SNAPSHOT_FIELD_CACHE.get(path)
+    if field is None:
+        field = lf.load_neutral_fraction_field(path)
+        _SNAPSHOT_FIELD_CACHE[path] = field
+    return field
+
+
+def _compute_lightcone_tau_batch(theta_batch, n_bub, z0, main_dir, rng):
+    """For each simulation k in this batch: draw x_H_target ONCE (shared by
+    every galaxy -- this alone also fixes the part of the original bug where
+    x_H was independently redrawn per galaxy, even before the field-sharing
+    fix), select+load(+cache) a matching snapshot, draw a fresh periodic-box
+    augmentation, carve this simulation's theta bubble(s) in, and ray-trace
+    every galaxy's sightline through the shared result.
+
+    Returns tau_lightcone, shape (n_gal, batch_size, n_wave) -- the
+    theta-dependent "outside the fitted bubble" IGM optical depth, to be
+    combined with `_S.j_s`/`_S.ew_int`/`_S.tau_cgm` (unchanged, from
+    `_refresh_mc_state`) downstream.
+    """
+    s = rdr._S
+    n_gal = len(s.x_gal)
+    batch_size = len(theta_batch)
+    wave_em_vals = rdr.wave_em.value
+    d_c0 = Cosmo.comoving_distance(z0).to(u.Mpc).value
+
+    tau_out = np.empty((n_gal, batch_size, len(wave_em_vals)), dtype=np.float64)
+
+    for k in range(batch_size):
+        theta = theta_batch[k]
+        inside_gals, z_end_bub_arr = rdr._inside_and_z_end(theta, n_bub)
+        bubbles = _theta_to_spheres(theta, n_bub)
+
+        x_h_target = float(get_xH(z0, main_dir=main_dir))
+        snap = lf.select_snapshot(x_h_target)
+        field = _load_snapshot_cached(snap.path)
+        aug = lf.draw_augmentation(rng)
+
+        for g in range(n_gal):
+            # z_end_bub_arr[g] == s.redshifts[g] exactly for a galaxy not
+            # inside any bubble (see _inside_and_z_end), so this single
+            # real-cosmology conversion handles both cases uniformly --
+            # for a not-inside galaxy it reproduces z_gal[g] exactly (since
+            # that's how radec_to_comoving computed it in the first place).
+            z_start_mpc = (Cosmo.comoving_distance(z_end_bub_arr[g]).to(u.Mpc).value
+                          - d_c0)
+            tau_out[g, k, :] = lf.ray_trace_outside_tau(
+                field, aug, s.x_gal[g], s.y_gal[g], z_start_mpc, d_c0,
+                s.redshifts[g], wave_em_vals, bubbles=bubbles, x_h_tail=x_h_target,
+            )
+
+    return tau_out
+
+
+def _ew_pred_from_lightcone_tau(k_idx):
+    """Combine this simulation's ray-traced tau with the (theta-independent,
+    already-populated-by-_refresh_mc_state) line profile/intrinsic-EW/CGM
+    draws -- same trapz/exp(-tau) combination `_ew_and_t_for_inside`
+    (real_data_run.py) already does, just reading `_S.lightcone_tau` instead
+    of the discrete-bubble tau_prec/tau_post."""
+    s = rdr._S
+    tau_now  = s.lightcone_tau[:, k_idx, :]           # (n_gal, n_wave)
+    j_s_k    = s.j_s[:, k_idx, :]                      # (n_gal, n_wave)
+    weighted = j_s_k * s.tau_cgm * np.exp(-tau_now)
+    numerator = np.trapz(weighted, rdr.wave_em.value, axis=1)
+    t_in = numerator / s.j_s_trapz_denom[:, k_idx]
+    return s.ew_int[:, k_idx] * t_in
+
+
+def simulate_one(k_idx, rng):
     """One stochastic forward-model draw: model-predicted EW for this
-    theta and MC-draw index, then one noisy/censored simulated x."""
-    inside_gals, z_end_bub_arr = rdr._inside_and_z_end(theta, n_bub)
-    ew_pred, _ = rdr._build_predictions(inside_gals, z_end_bub_arr, k_idx=k_idx)
-    ew_pred = ew_pred[:, 0]   # (n_gal, 1) -> (n_gal,)
+    MC-draw index (theta's effect is already baked into `_S.lightcone_tau[
+    :, k_idx, :]`, computed in the parent -- see `_compute_lightcone_tau_batch`),
+    then one noisy/censored simulated x."""
+    ew_pred = _ew_pred_from_lightcone_tau(k_idx)
     return _build_x(ew_pred, _per_galaxy_sigma(), rng)
 
 
@@ -128,20 +246,25 @@ def simulate_one(theta, k_idx, n_bub, rng):
 
 def _simulate_worker(task):
     """Runs in a forked worker -- `_S` is fully populated pre-fork (parent
-    calls `_refresh_mc_state` before creating the Pool), inherited via
-    copy-on-write with no repickling, same pattern as `_run_dynesty`."""
-    i, theta, k_idx, n_bub, noise_seed = task
+    calls `_refresh_mc_state` AND `_compute_lightcone_tau_batch` before
+    creating the Pool), inherited via copy-on-write with no repickling, same
+    pattern as `_run_dynesty`. Unlike the pre-lightcone version, `theta`
+    itself is no longer needed here -- its effect on the prediction was
+    already computed in the parent (the ray trace), so this step is purely
+    the noise-injection/detection-decision layer."""
+    i, k_idx, noise_seed = task
     rng = np.random.default_rng(noise_seed)
-    return i, simulate_one(theta, k_idx, n_bub, rng)
+    return i, simulate_one(k_idx, rng)
 
 
 def _generate_split(meta, n_bub, n_sim, batch_size, n_workers, main_dir,
                     seed, output_dir, prefix):
     """Bulk-generate `n_sim` (theta, x) pairs in resumable batches of
     `batch_size`, saved as `{prefix}_batch_{i:05d}.npz`. Each batch calls
-    `_refresh_mc_state` once (a fresh draw per simulation in that batch, 1:1
-    paired via k_idx) and parallelizes the noise/detection step across a
-    fork pool."""
+    `_refresh_mc_state` (unchanged) and `_compute_lightcone_tau_batch` (new,
+    the shared-field ray trace) once -- both in the parent, before forking --
+    then parallelizes the noise/detection step across a fork pool, 1:1
+    paired via k_idx."""
     ndim = _N_BUB_TO_NDIM[n_bub]
     prior_transform = _N_BUB_TO_PRIOR_TRANSFORM[n_bub]
     rng_master = np.random.default_rng(seed)
@@ -164,8 +287,13 @@ def _generate_split(meta, n_bub, n_sim, batch_size, n_workers, main_dir,
 
         u_batch = rng_master.uniform(size=(this_batch, ndim))
         theta_batch = np.array([prior_transform(u) for u in u_batch])
+
+        rdr._S.lightcone_tau = _compute_lightcone_tau_batch(
+            theta_batch, n_bub, meta['z0'], main_dir, rng_master,
+        )
+
         noise_seeds = rng_master.integers(0, 2**31 - 1, size=this_batch)
-        tasks = [(i, theta_batch[i], i, n_bub, int(noise_seeds[i])) for i in range(this_batch)]
+        tasks = [(i, i, int(noise_seeds[i])) for i in range(this_batch)]
 
         with mp.get_context('fork').Pool(n_workers) as pool:
             results = pool.map(_simulate_worker, tasks)
