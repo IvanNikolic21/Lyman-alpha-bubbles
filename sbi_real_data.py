@@ -71,6 +71,7 @@ os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 import glob
+import time
 import argparse
 import multiprocessing as mp
 import numpy as np
@@ -171,7 +172,8 @@ def _load_snapshot_cached(path):
     return field
 
 
-def _compute_lightcone_tau_batch(theta_batch, n_bub, z0, main_dir, rng):
+def _compute_lightcone_tau_batch(theta_batch, n_bub, z0, main_dir, rng,
+                                  n_done_before=0, n_sim_total=None, prefix=''):
     """For each simulation k in this batch: draw x_H_target ONCE (shared by
     every galaxy -- this alone also fixes the part of the original bug where
     x_H was independently redrawn per galaxy, even before the field-sharing
@@ -183,12 +185,21 @@ def _compute_lightcone_tau_batch(theta_batch, n_bub, z0, main_dir, rng):
     theta-dependent "outside the fitted bubble" IGM optical depth, to be
     combined with `_S.j_s`/`_S.ew_int`/`_S.tau_cgm` (unchanged, from
     `_refresh_mc_state`) downstream.
+
+    This loop (ray-tracing every galaxy for every sim in the batch) is the
+    dominant cost of `simulate`, so it prints its own progress -- for a
+    single big batch (e.g. --n_sim <= --batch_size, the common case) the
+    batch-level print in `_generate_split` only fires once the whole batch
+    is done, which is too coarse to watch a long cluster run live.
     """
     s = rdr._S
     n_gal = len(s.x_gal)
     batch_size = len(theta_batch)
     wave_em_vals = rdr.wave_em.value
     d_c0 = Cosmo.comoving_distance(z0).to(u.Mpc).value
+    n_sim_total = n_sim_total if n_sim_total is not None else batch_size
+    print_every = max(1, batch_size // 20)
+    t_start = time.perf_counter()
 
     tau_out = np.empty((n_gal, batch_size, len(wave_em_vals)), dtype=np.float64)
 
@@ -214,6 +225,16 @@ def _compute_lightcone_tau_batch(theta_batch, n_bub, z0, main_dir, rng):
                 field, aug, s.x_gal[g], s.y_gal[g], z_start_mpc, d_c0,
                 s.redshifts[g], wave_em_vals, bubbles=bubbles, x_h_tail=x_h_target,
             )
+
+        if (k + 1) % print_every == 0 or k == batch_size - 1:
+            n_overall = n_done_before + k + 1
+            elapsed = time.perf_counter() - t_start
+            rate = (k + 1) / elapsed if elapsed > 0 else 0.0
+            eta_s = (batch_size - (k + 1)) / rate if rate > 0 else float('nan')
+            print(f"[simulate:{prefix}] {n_overall}/{n_sim_total} sims done "
+                  f"({100.0 * n_overall / n_sim_total:.1f}%) -- "
+                  f"{k + 1}/{batch_size} in this batch, "
+                  f"{rate:.2f} sims/s, ETA this batch {eta_s:.0f}s", flush=True)
 
     return tau_out
 
@@ -305,6 +326,7 @@ def _generate_split(meta, n_bub, n_sim, batch_size, n_workers, main_dir,
 
         rdr._S.lightcone_tau = _compute_lightcone_tau_batch(
             theta_batch, n_bub, meta['z0'], main_dir, rng_master,
+            n_done_before=n_done, n_sim_total=n_sim, prefix=prefix,
         )
 
         noise_seeds = rng_master.integers(0, 2**31 - 1, size=this_batch)
