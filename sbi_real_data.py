@@ -275,8 +275,23 @@ def _generate_split(meta, n_bub, n_sim, batch_size, n_workers, main_dir,
         this_batch = min(batch_size, n_sim - n_done)
         out_path = os.path.join(output_dir, f"{prefix}_batch_{batch_idx:05d}.npz")
         if os.path.exists(out_path):
-            print(f"[simulate:{prefix}] {out_path} exists, skipping (resumable).", flush=True)
-            n_done += this_batch
+            # Resume by what's ACTUALLY in the file, not by assuming it matches
+            # `this_batch` -- an existing file from a run with different
+            # --n_sim/--batch_size (e.g. an earlier smoke test in the same
+            # --output_dir) would otherwise silently be treated as if it held
+            # `this_batch` sims, undercounting n_done and making `simulate`
+            # report a target count it never actually generated.
+            existing_n = len(np.load(out_path)['theta'])
+            if existing_n != this_batch:
+                print(f"[simulate:{prefix}] WARNING: {out_path} exists with {existing_n} sims, "
+                      f"not the {this_batch} this run expects at batch {batch_idx} -- looks like "
+                      f"it's from a run with different --n_sim/--batch_size in this same "
+                      f"--output_dir. Using the {existing_n} sims already on disk (will generate "
+                      f"more batches to top up to --n_sim); delete this file first if you want it "
+                      f"regenerated with the new parameters instead.", flush=True)
+            print(f"[simulate:{prefix}] {out_path} exists ({existing_n} sims), skipping (resumable).",
+                  flush=True)
+            n_done += existing_n
             batch_idx += 1
             continue
 
