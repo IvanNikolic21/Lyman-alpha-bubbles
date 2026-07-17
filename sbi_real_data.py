@@ -83,6 +83,11 @@ import real_data_run as rdr
 from lyabubbles.igm_prop import get_xH
 from lyabubbles import lightcone_field as lf
 
+try:
+    import torch as _torch   # soft/optional -- `simulate` must work without torch installed
+except ImportError:
+    _torch = None
+
 _N_BUB_TO_NDIM = {1: rdr.NDIM, 2: rdr.NDIM_2BUB, 3: rdr.NDIM_3BUB}
 _N_BUB_TO_PRIOR_TRANSFORM = {1: rdr._prior_transform, 2: rdr._prior_transform_2bub,
                              3: rdr._prior_transform_3bub}
@@ -432,38 +437,50 @@ def _log_prob_theta(theta_batch, n_bub):
     return log_p
 
 
-def _make_sbi_prior(n_bub, device='cpu'):
-    """A torch.distributions.Distribution-compatible prior object wrapping
-    `_prior_transform`/`_log_prob_theta`, for `sbi.inference.NPE(prior=...)`.
-    `device`: must match the `device=` passed to `NPE(...)` -- sbi calls
-    `.sample()`/`.log_prob()` on this prior during training/posterior
-    building, and a device mismatch between the prior's tensors and the
-    density estimator's (e.g. prior on CPU, network on CUDA) will error or
-    silently force a slow/incorrect fallback."""
-    import torch
+if _torch is not None:
+    class _BubblePrior(_torch.distributions.Distribution):
+        """A torch.distributions.Distribution-compatible prior wrapping
+        `_prior_transform`/`_log_prob_theta`, for `sbi.inference.NPE(prior=...)`.
+        `device`: must match the `device=` passed to `NPE(...)` -- sbi calls
+        `.sample()`/`.log_prob()` on this prior during training/posterior
+        building, and a device mismatch between the prior's tensors and the
+        density estimator's (e.g. prior on CPU, network on CUDA) will error
+        or silently force a slow/incorrect fallback.
 
-    s = rdr._S
-    ndim = _N_BUB_TO_NDIM[n_bub]
-    prior_transform = _N_BUB_TO_PRIOR_TRANSFORM[n_bub]
-
-    class _BubblePrior(torch.distributions.Distribution):
+        MUST be defined at true module scope (guarded by `_torch is not
+        None` so `simulate` still works with no torch installed, NOT nested
+        inside a function) -- the trained `posterior` object (`run_train`)
+        holds a reference to this prior internally, and `torch.save`/
+        `torch.load` pickle the whole object graph by qualified name. A
+        class nested inside a function has no such resolvable name, so any
+        process loading the checkpoint in a SEPARATE run (always true for
+        `infer` -- a different `python ...` invocation than `train`) failed
+        with `AttributeError: Can't get local object '...<locals>._BubblePrior'`,
+        regardless of working directory -- fixed by moving the actual
+        `torch.distributions.Distribution` subclass here, with explicit
+        constructor args (`n_bub`, `device`) instead of closures over local
+        variables."""
         arg_constraints = {}
         has_rsample = False
 
-        def __init__(self):
-            super().__init__(event_shape=torch.Size([ndim]), validate_args=False)
+        def __init__(self, n_bub, device='cpu'):
+            self.n_bub = n_bub
+            self.device = device
+            self.ndim = _N_BUB_TO_NDIM[n_bub]
+            self.prior_transform = _N_BUB_TO_PRIOR_TRANSFORM[n_bub]
+            super().__init__(event_shape=_torch.Size([self.ndim]), validate_args=False)
 
-        def sample(self, sample_shape=torch.Size()):
+        def sample(self, sample_shape=_torch.Size()):
             n = int(np.prod(sample_shape)) if len(sample_shape) else 1
-            u = np.random.uniform(size=(n, ndim))
-            theta = np.array([prior_transform(ui) for ui in u])
-            out = torch.as_tensor(theta, dtype=torch.float32, device=device)
-            return out.reshape(*sample_shape, ndim) if len(sample_shape) else out[0]
+            u = np.random.uniform(size=(n, self.ndim))
+            theta = np.array([self.prior_transform(ui) for ui in u])
+            out = _torch.as_tensor(theta, dtype=_torch.float32, device=self.device)
+            return out.reshape(*sample_shape, self.ndim) if len(sample_shape) else out[0]
 
         def log_prob(self, value):
             value_np = value.detach().cpu().numpy()
-            lp = _log_prob_theta(value_np, n_bub)
-            return torch.as_tensor(lp, dtype=torch.float32, device=device)
+            lp = _log_prob_theta(value_np, self.n_bub)
+            return _torch.as_tensor(lp, dtype=_torch.float32, device=self.device)
 
         @property
         def support(self):
@@ -475,12 +492,19 @@ def _make_sbi_prior(n_bub, device='cpu'):
             # invalid (wrong z-order) proposals through the box check that
             # `log_prob` then correctly zeroes out downstream -- verify this
             # is actually handled correctly by whatever sbi does with
-            # `support` once installed.
-            lo = torch.as_tensor(np.tile(s.prior_lo, n_bub), dtype=torch.float32, device=device)
-            hi = torch.as_tensor(np.tile(s.prior_hi, n_bub), dtype=torch.float32, device=device)
-            return torch.distributions.constraints.interval(lo, hi)
+            # `support` once installed. Reads `rdr._S` fresh on each access
+            # (not cached at construction) so this reflects whatever catalog
+            # THIS process loaded, not whatever the training process had.
+            s = rdr._S
+            lo = _torch.as_tensor(np.tile(s.prior_lo, self.n_bub), dtype=_torch.float32,
+                                  device=self.device)
+            hi = _torch.as_tensor(np.tile(s.prior_hi, self.n_bub), dtype=_torch.float32,
+                                  device=self.device)
+            return _torch.distributions.constraints.interval(lo, hi)
 
-    return _BubblePrior()
+
+def _make_sbi_prior(n_bub, device='cpu'):
+    return _BubblePrior(n_bub, device=device)
 
 
 # ── Training ─────────────────────────────────────────────────────────────────
