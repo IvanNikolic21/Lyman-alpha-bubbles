@@ -328,7 +328,28 @@ def run_train_nre(args):
     prior = BoxUniform(low=torch.zeros(theta_train.shape[1]),
                        high=torch.ones(theta_train.shape[1]))
 
-    inference = SNRE_B(prior=prior, device=args.device)
+    # Custom CNN embedding for theta (exploits its (n_gal, n_los) grid
+    # structure, see sbi_pixel_nn.py) -- best-effort: sbi's exact
+    # classifier_nn(embedding_net_theta=...) signature is unverified against
+    # the installed version, so fall back to the plain default classifier
+    # (flat MLP over theta) rather than hard-failing if it doesn't fit.
+    classifier = None
+    if args.embedding == 'cnn':
+        try:
+            from sbi.neural_nets import classifier_nn
+            from sbi_pixel_nn import ThetaGridEmbedding
+            embedding_net_theta = ThetaGridEmbedding(n_gal, n_los)
+            classifier = classifier_nn(model='resnet', embedding_net_theta=embedding_net_theta)
+            print("[train_nre] using CNN embedding net for theta "
+                  f"({n_gal} x {n_los} grid)", flush=True)
+        except Exception as e:
+            print(f"[train_nre] CNN embedding net setup failed ({type(e).__name__}: {e}) -- "
+                  f"falling back to sbi's default classifier. Pass --embedding none to skip "
+                  f"this attempt entirely.", flush=True)
+            classifier = None
+
+    inference = (SNRE_B(prior=prior, classifier=classifier, device=args.device)
+                if classifier is not None else SNRE_B(prior=prior, device=args.device))
     inference.append_simulations(
         torch.as_tensor(theta_train, dtype=torch.float32, device=args.device),
         torch.as_tensor(x_train, dtype=torch.float32, device=args.device),
@@ -449,6 +470,11 @@ if __name__ == '__main__':
     p_train.add_argument('--sims_dir', type=str, required=True,
                          help='--output_dir from a prior `simulate` run.')
     p_train.add_argument('--device', type=str, default='cpu')
+    p_train.add_argument('--embedding', type=str, default='cnn', choices=['cnn', 'none'],
+                         help="'cnn': custom embedding net exploiting theta's (n_gal, n_los) "
+                              "grid structure (best-effort, falls back to sbi's default "
+                              "classifier if the API call fails). 'none': sbi's default flat "
+                              "classifier.")
     p_train.add_argument('--output_dir', type=str, required=True)
 
     p_infer = sub.add_parser('infer', help='Pool-based inference at the real x_obs: marginal '

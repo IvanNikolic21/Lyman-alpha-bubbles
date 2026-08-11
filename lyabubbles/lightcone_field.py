@@ -403,20 +403,26 @@ def ray_trace_outside_tau(field, aug, x_transverse_mpc, y_transverse_mpc,
 # `_merge_runs`).
 
 def draw_stack_augmentations(anchor_idx: int, rng: np.random.Generator, table: list = None):
-    """One fresh `AugmentationParams` per table entry from `anchor_idx` to the
-    end of `table` -- i.e. every box a sightline could possibly need for this
-    anchor, drawn ONCE. Callers doing multiple galaxies per simulated draw
-    (the whole point of the shared-lightcone design -- see module docstring
-    and `sbi_pixel_field.py`) MUST draw this once per draw and pass the SAME
+    """One fresh `AugmentationParams` per table entry from index 0 through
+    `anchor_idx` -- i.e. every box a sightline could possibly need for this
+    anchor, drawn ONCE. `table` is ordered with INCREASING index alongside
+    INCREASING z/x_H (index 0 = lowest z = most ionized available; see
+    `_RAW_SNAPSHOTS`), and a sightline walks toward the observer (decreasing
+    z, decreasing table index -- see `ray_trace_segments_stacked`), so every
+    index from 0 up to the anchor is a box the walk could actually reach.
+
+    Callers doing multiple galaxies per simulated draw (the whole point of
+    the shared-lightcone design -- see module docstring and
+    `sbi_pixel_field.py`) MUST draw this once per draw and pass the SAME
     dict to `ray_trace_segments_stacked` for every galaxy in that draw, not
     let each galaxy draw its own -- otherwise each galaxy would see an
     independent field realization per box, silently reintroducing the exact
     per-galaxy-independence problem the shared-field design exists to fix.
 
     Returns `{box_idx: AugmentationParams}` keyed by absolute index into
-    `table` (from `anchor_idx` through `len(table) - 1`)."""
+    `table` (from `0` through `anchor_idx`)."""
     table = table or SNAPSHOT_TABLE
-    return {i: draw_augmentation(rng) for i in range(anchor_idx, len(table))}
+    return {i: draw_augmentation(rng) for i in range(0, anchor_idx + 1)}
 
 
 def ray_trace_segments_stacked(anchor_idx: int, aug_by_box: dict,
@@ -425,15 +431,17 @@ def ray_trace_segments_stacked(anchor_idx: int, aug_by_box: dict,
                                z_end: float = Z_END_DEFAULT, table: list = None):
     """Multi-box lightcone stacking: starting from `table[anchor_idx]`
     (typically `select_snapshot_index(x_h_target)` on a target drawn the same
-    way `sbi_real_data.py` already does), walk successive entries of `table`
+    way `sbi_real_data.py` already does), walk PREVIOUS entries of `table`
     -- by INDEX, not literal z-label -- as the ray exhausts each box's
     384 cMpc. The 13 available snapshots are 13 timesteps of ONE 21cmFAST
     simulation and are already ordered by both z and x_H (higher index =
-    higher z = more neutral), so walking the table forward as the ray
-    approaches the observer reproduces that simulation's own reionization
-    history, regardless of whether a given box's literal z-label lines up
-    with the ray's actual redshift at that point -- the same modeling
-    liberty `select_snapshot` already takes for the anchor box.
+    higher z = more neutral -- see `_RAW_SNAPSHOTS`), and a sightline moves
+    toward the observer (decreasing z) as it's traced, and the universe gets
+    MORE ionized at lower z -- so the walk must move toward LOWER indices as
+    it proceeds, reproducing that simulation's own reionization history,
+    regardless of whether a given box's literal z-label lines up with the
+    ray's actual redshift at that point -- the same modeling liberty
+    `select_snapshot` already takes for the anchor box.
 
     `aug_by_box`: `{box_idx: AugmentationParams}` from `draw_stack_augmentations`
     -- drawn ONCE per simulated draw (not per galaxy/per call) and reused for
@@ -444,13 +452,13 @@ def ray_trace_segments_stacked(anchor_idx: int, aug_by_box: dict,
     not decorrelated across galaxies within one draw.
 
     If the ray reaches `z_end` before exhausting the table: done. If it runs
-    off the low-x_H end of `table` (index `len(table)`) before reaching
-    `z_end`: appends one final uniform-tail segment down to `z_end` using
-    the LAST box's own x_H (mirrors `ray_trace_segments`'s `x_h_tail`
-    mechanism) -- expected for every galaxy here, since the table's lowest
-    available x_H (~0.27 at z=6.5) sits well above `z_end=5.3`; this residual
-    near-`z_end` stretch is still a uniform approximation, a known
-    limitation carried forward, not a bug.
+    off the low-x_H end of `table` (index `-1`) before reaching `z_end`:
+    appends one final uniform-tail segment down to `z_end` using the LAST
+    box's own x_H (mirrors `ray_trace_segments`'s `x_h_tail` mechanism) --
+    expected for every galaxy here, since the table's lowest available x_H
+    (~0.27 at z=6.5) sits well above `z_end=5.3`; this residual near-`z_end`
+    stretch is still a uniform approximation, a known limitation carried
+    forward, not a bug.
 
     No bubble-carving in this path -- there is no fitted "main bubble"
     concept in the pixelated model, the returned segments are the field's
@@ -495,11 +503,11 @@ def ray_trace_segments_stacked(anchor_idx: int, aug_by_box: dict,
         if reached_z_end:
             break
         if reached_box_edge:
-            box_idx += 1
-            if box_idx >= len(table):
+            box_idx -= 1
+            if box_idx < 0:
                 z_reached = float(z_of_comoving_distance(d_c_box_cap))
                 z_b_list.append(z_reached); z_e_list.append(z_end)
-                xhi_list.append(table[box_idx - 1].x_h)
+                xhi_list.append(table[box_idx + 1].x_h)
                 break
             field = _get_cached_field(table[box_idx].path)
             aug = aug_by_box[box_idx]
