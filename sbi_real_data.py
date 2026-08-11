@@ -410,6 +410,26 @@ def run_train(args):
     theta_train, x_train = load_sims(args.sims_dir, 'train')
     print(f"[train] loaded {len(theta_train)} training sims from {args.sims_dir}", flush=True)
 
+    # `load_sims` does no format validation -- it just concatenates whatever
+    # theta/x arrays it finds. `--sims_dir` is a free-text path, and this
+    # exact mistake already happened once: --sims_dir pointed at a directory
+    # that ALSO held sbi_pixel_field.py's pixel-mask sims (same batch-file
+    # naming convention, same x dimensionality since both reuse _pack_x, so
+    # only theta's shape actually differs) -- NPE.append_simulations/train()
+    # doesn't itself check theta against the prior's declared ndim, so that
+    # run "succeeded" (converged, saved a checkpoint) while silently training
+    # on the wrong data. Fail loudly instead.
+    expected_ndim = _N_BUB_TO_NDIM[args.n_bub]
+    if theta_train.shape[1] != expected_ndim:
+        raise ValueError(
+            f"--sims_dir {args.sims_dir!r} theta has shape {theta_train.shape}, but "
+            f"--n_bub {args.n_bub} expects {expected_ndim} columns. This almost always "
+            f"means --sims_dir contains simulations from a DIFFERENT run (e.g. a "
+            f"different --n_bub, or sbi_pixel_field.py's pixel-mask sims, which use the "
+            f"same batch-file naming convention) -- point --sims_dir at a directory that "
+            f"only holds this model's own `simulate` output."
+        )
+
     # _log_prob_theta/_make_sbi_prior read _S.prior_lo/_S.prior_hi -- need the
     # catalog loaded (cheap, no MC draw needed) so the prior's support matches
     # what these sims were actually drawn from.

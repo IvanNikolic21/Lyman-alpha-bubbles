@@ -164,6 +164,20 @@ if __name__ == '__main__':
     param_names = checkpoint['param_names']
 
     theta_val, x_val = sbird.load_sims(args.sims_dir, 'val')
+
+    # Same blind spot as sbi_real_data.py's run_train (see its comment) --
+    # load_sims does no format validation, and --sims_dir is free text, so a
+    # directory holding a DIFFERENT model's (or sbi_pixel_field.py's
+    # pixel-mask) sims would otherwise be ranked silently instead of erroring.
+    expected_ndim = sbird._N_BUB_TO_NDIM[n_bub]
+    if theta_val.shape[1] != expected_ndim:
+        raise ValueError(
+            f"--sims_dir {args.sims_dir!r} theta has shape {theta_val.shape}, but the "
+            f"checkpoint's M{n_bub} expects {expected_ndim} columns -- --sims_dir almost "
+            f"certainly holds simulations from a different run. Point it at the SAME "
+            f"--output_dir the posterior was actually trained from."
+        )
+
     if args.n_val_max is not None:
         theta_val, x_val = theta_val[:args.n_val_max], x_val[:args.n_val_max]
     print(f"[sbc] {len(theta_val)} held-out validation sims for M{n_bub}", flush=True)
