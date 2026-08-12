@@ -142,6 +142,9 @@ def _try_sbi_native_sbc(posterior, theta_val, x_val, param_names, output_dir, n_
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    sbird._add_catalog_args(parser)   # needed so _load_catalog_and_priors below can run --
+                                      # posterior.sample()'s rejection sampling calls the
+                                      # prior's support/log_prob, which reads rdr._S.prior_lo/hi
     parser.add_argument('--posterior', type=str, required=True, help='.pt from `sbi_real_data.py train`.')
     parser.add_argument('--sims_dir', type=str, required=True,
                         help='--output_dir from `sbi_real_data.py simulate` (uses its val_batch_*.npz).')
@@ -162,6 +165,20 @@ if __name__ == '__main__':
     posterior = checkpoint['posterior']
     n_bub = checkpoint['n_bub']
     param_names = checkpoint['param_names']
+
+    # Populates rdr._S.prior_lo/prior_hi -- the prior's support/log_prob
+    # (sbi_prior.py::_BubblePrior) reads these fresh on every call, and
+    # posterior.sample()'s internal rejection sampling calls them. Without
+    # this, _S is an empty SimpleNamespace in this process (this script never
+    # otherwise touches the catalog) and log_prob crashes with
+    # AttributeError: 'SimpleNamespace' object has no attribute 'prior_lo'.
+    # Use the SAME catalog/z-window/prior args the posterior was actually
+    # trained with, or its prior's support won't match what it learned.
+    sbird.rdr._load_catalog_and_priors(
+        args.lya_catalog, args.properties_catalog, args.z_lo, args.z_hi,
+        args.z_min, args.muv_max, args.main_dir, r_max=args.r_max, prefer=args.prefer,
+        legacy_catalog_path=args.legacy_catalog,
+    )
 
     theta_val, x_val = sbird.load_sims(args.sims_dir, 'val')
 
