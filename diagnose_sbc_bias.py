@@ -57,10 +57,11 @@ def main():
     rng = np.random.default_rng(args.seed)
     idx = rng.choice(len(theta_val), size=min(args.n_check, len(theta_val)), replace=False)
 
-    print(f"{'param':>8s}  {'true':>9s}  {'post_mean':>9s}  {'post_med':>9s}  "
+    print(f"{'param':>8s}  {'true':>9s}  {'post_mean':>9s}  {'post_med':>9s}  {'post_std':>9s}  "
           f"{'bias(mean-true)':>16s}  {'near_hi_bound':>13s}  {'near_lo_bound':>13s}")
 
     biases = {name: [] for name in param_names}
+    post_stds = {name: [] for name in param_names}
     n_near_hi_bound = {name: 0 for name in param_names}
     for i in idx:
         with warnings.catch_warnings(record=True) as caught:
@@ -76,27 +77,39 @@ def main():
 
         post_mean = samples.mean(axis=0)
         post_med = np.median(samples, axis=0)
+        post_std = samples.std(axis=0)
         true = theta_val[i]
 
         for k, name in enumerate(param_names):
             bias = post_mean[k] - true[k]
             biases[name].append(bias)
+            post_stds[name].append(post_std[k])
             frac_range = (prior_hi[k % 4] - prior_lo[k % 4])
             near_hi = np.mean(samples[:, k] > prior_hi[k % 4] - 0.02 * frac_range)
             near_lo = np.mean(samples[:, k] < prior_lo[k % 4] + 0.02 * frac_range)
             if near_hi > 0.05:
                 n_near_hi_bound[name] += 1
             print(f"{name:>8s}  {true[k]:9.3f}  {post_mean[k]:9.3f}  {post_med[k]:9.3f}  "
-                  f"{bias:16.3f}  {near_hi:13.2%}  {near_lo:13.2%}")
+                  f"{post_std[k]:9.3f}  {bias:16.3f}  {near_hi:13.2%}  {near_lo:13.2%}")
         print()
 
     print("=" * 70)
     print("Summary over checked sims:")
-    for name in param_names:
+    for k, name in enumerate(param_names):
         b = np.array(biases[name])
-        print(f"  {name:8s}  mean(post_mean - true) = {b.mean():+.3f}  "
-              f"(std {b.std():.3f})  -- {n_near_hi_bound[name]}/{len(idx)} sims had "
-              f">5% of posterior samples within 2% of the prior's upper bound")
+        s = np.array(post_stds[name])
+        # std of the TRUE values themselves (drawn from the real prior, across the
+        # checked sims) as an apples-to-apples reference for "how wide the prior
+        # actually is" -- if mean posterior std is much smaller than this, the
+        # network is collapsing to overconfident predictions, not honestly
+        # reflecting weak data (which would instead give a WIDE, prior-like std).
+        true_std_ref = theta_val[idx, k].std()
+        print(f"  {name:8s}  mean(post_mean - true) = {b.mean():+.3f}  (std of bias {b.std():.3f})")
+        print(f"  {' ' * 8}  mean posterior std = {s.mean():.3f}  vs.  std of TRUE values "
+              f"(checked sample) = {true_std_ref:.3f}  "
+              f"-> posterior is {s.mean() / true_std_ref:.1%} as wide as the prior's own spread")
+        print(f"  {' ' * 8}  {n_near_hi_bound[name]}/{len(idx)} sims had >5% of posterior "
+              f"samples within 2% of the prior's upper bound")
 
 
 if __name__ == '__main__':
