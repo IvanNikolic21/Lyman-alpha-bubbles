@@ -69,11 +69,18 @@ python sbi_pixel_field.py infer     --n_los 75 --ratio sbi_runs/pixel/ratio.pt \
 """
 
 import os
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-os.environ['NUMEXPR_NUM_THREADS'] = '1'
+import sys
+
+# Same reasoning as sbi_real_data.py's identical block -- only `simulate`'s
+# forked worker pool (_generate_split, mp.Pool) needs single-threaded BLAS to
+# avoid oversubscription; `train_nre`/`infer` are single-process and would
+# otherwise be needlessly capped to 1 thread regardless of allocated CPUs.
+if len(sys.argv) > 1 and sys.argv[1] == 'simulate':
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+    os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 import glob
 import time

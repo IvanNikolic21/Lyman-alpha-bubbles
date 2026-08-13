@@ -20,11 +20,10 @@ python sbi_calibrate.py --posterior sbi_runs/m1/posterior_m1.pt \\
 """
 
 import os
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-os.environ['NUMEXPR_NUM_THREADS'] = '1'
+# No forked worker pool anywhere in this file (unlike sbi_real_data.py's
+# `simulate`), so there's no BLAS-oversubscription risk to guard against --
+# capping to 1 thread here would only throttle `posterior.sample()`'s torch
+# calls for no benefit, regardless of allocated CPUs.
 
 import argparse
 import numpy as np

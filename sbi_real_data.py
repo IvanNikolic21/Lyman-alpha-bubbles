@@ -64,11 +64,23 @@ python sbi_real_data.py infer    --n_bub 1 --posterior sbi_runs/m1/posterior.pt 
 """
 
 import os
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-os.environ['NUMEXPR_NUM_THREADS'] = '1'
+import sys
+
+# Thread-count env vars must be set before numpy/scipy/torch import (they read
+# these at their own import/init time, not when os.environ is later mutated),
+# so this has to happen before ANY of those imports below, and before argparse
+# has even run -- hence the raw sys.argv peek. Only actually needed for
+# `simulate`, whose forked worker pool (_generate_split, mp.Pool) would
+# otherwise oversubscribe cores if each of the N forked processes also spun up
+# its own multi-threaded BLAS calls. `train`/`infer` are single-process, no
+# forked pool -- capping them to 1 thread here would only throttle PyTorch/BLAS
+# for no benefit, regardless of how many CPUs the job is given.
+if len(sys.argv) > 1 and sys.argv[1] == 'simulate':
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+    os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 import glob
 import time
