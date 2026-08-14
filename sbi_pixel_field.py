@@ -377,6 +377,16 @@ def run_train_nre(args):
 def run_infer(args):
     import torch
 
+    if args.device.startswith('cuda') and not torch.cuda.is_available():
+        raise RuntimeError(f"--device {args.device!r} requested but torch.cuda.is_available() "
+                           f"is False on this machine/allocation -- if `train_nre` ran on a "
+                           f"GPU node and this is a different (CPU-only) node, pass --device "
+                           f"cpu here instead (map_location can move a checkpoint BETWEEN "
+                           f"devices, but not onto a cuda device that doesn't exist on the "
+                           f"current machine at all). `infer` is forward-pass-only, no "
+                           f"training -- CPU is normally plenty fast for it regardless of "
+                           f"what device the checkpoint was trained on.")
+
     checkpoint = torch.load(args.ratio, weights_only=False, map_location=args.device)
     ratio_estimator = checkpoint['ratio_estimator']
     n_gal, n_los = checkpoint['n_gal'], checkpoint['n_los']

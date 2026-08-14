@@ -476,6 +476,16 @@ def run_train(args):
 def run_infer(args):
     import torch
 
+    if args.device.startswith('cuda') and not torch.cuda.is_available():
+        raise RuntimeError(f"--device {args.device!r} requested but torch.cuda.is_available() "
+                           f"is False on this machine/allocation -- if `train` ran on a GPU "
+                           f"node and this is a different (CPU-only) node, pass --device cpu "
+                           f"here instead (map_location can move a checkpoint BETWEEN devices, "
+                           f"but not onto a cuda device that doesn't exist on the current "
+                           f"machine at all). `infer` only samples the trained posterior, no "
+                           f"training -- CPU is normally plenty fast for it regardless of what "
+                           f"device the checkpoint was trained on.")
+
     # weights_only=False + map_location: torch.load defaults to the device the
     # checkpoint was SAVED on, which errors if that was 'cuda' and this
     # machine/allocation has no GPU (or vice versa) -- map_location=args.device
