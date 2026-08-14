@@ -1,8 +1,13 @@
 """
 Visual sanity check for `sbi_pixel_field.py simulate` output: plots a handful
 of individual simulated binary ionization masks (theta, shape n_gal x n_los)
-as heatmaps, plus an aggregate mean-ionized-fraction-per-pixel map and a
-histogram of per-draw ionized fraction across the whole batch.
+as heatmaps, plus an aggregate mean-neutral-fraction-per-pixel map and a
+histogram of per-draw neutral fraction across the whole batch.
+
+Convention (from `discretize_to_fixed_bins` in lyabubbles/lightcone_field.py):
+theta = (weighted-mean x_HI >= threshold), i.e. theta=1 means NEUTRAL,
+theta=0 means IONIZED. (Fixed 2026-08-14 -- this file previously labeled it
+backwards throughout.)
 
 Standalone (numpy/matplotlib only, no `lyabubbles`/`real_data_run` import) so
 it runs anywhere the .npz files are, without needing py21cmfast installed.
@@ -52,10 +57,10 @@ def main():
     print(f"Loaded {n_sim} sims, {n_gal} galaxies x {n_los} LOS bins each, "
           f"from {args.sims_dir} (prefix={args.prefix!r})")
 
-    ionized_frac_per_draw = theta.mean(axis=(1, 2))
-    print(f"Ionized fraction per draw: mean={ionized_frac_per_draw.mean():.3f}, "
-          f"std={ionized_frac_per_draw.std():.3f}, "
-          f"range=[{ionized_frac_per_draw.min():.3f}, {ionized_frac_per_draw.max():.3f}]")
+    neutral_frac_per_draw = theta.mean(axis=(1, 2))
+    print(f"Neutral fraction per draw: mean={neutral_frac_per_draw.mean():.3f}, "
+          f"std={neutral_frac_per_draw.std():.3f}, "
+          f"range=[{neutral_frac_per_draw.min():.3f}, {neutral_frac_per_draw.max():.3f}]")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -70,12 +75,12 @@ def main():
     for ax, i in zip(axes.flat, idx):
         im = ax.imshow(theta[i], aspect='auto', cmap='cividis', vmin=0, vmax=1,
                        interpolation='nearest')
-        ax.set_title(f"sim {i}  (ionized frac={theta[i].mean():.2f})", fontsize=9)
+        ax.set_title(f"sim {i}  (neutral frac={theta[i].mean():.2f})", fontsize=9)
         ax.set_xlabel('LOS bin (0=near source, -1=near z_end)')
         ax.set_ylabel('galaxy index')
     for ax in axes.flat[n_examples:]:
         ax.axis('off')
-    fig.colorbar(im, ax=axes, shrink=0.6, label='0=neutral, 1=ionized')
+    fig.colorbar(im, ax=axes, shrink=0.6, label='0=ionized, 1=neutral')
     fig.suptitle(f"{args.prefix}: {n_examples} example simulated ionization masks "
                 f"({n_gal} gal x {n_los} LOS bins)")
     out1 = os.path.join(args.output_dir, f'{args.prefix}_example_masks.png')
@@ -83,26 +88,26 @@ def main():
     plt.close(fig)
     print(f"Saved {out1}")
 
-    # ── Aggregate: mean ionized fraction per pixel across the whole batch ──
+    # ── Aggregate: mean neutral fraction per pixel across the whole batch ──
     fig, ax = plt.subplots(figsize=(7, 4))
     im = ax.imshow(theta.mean(axis=0), aspect='auto', cmap='cividis', vmin=0, vmax=1,
                    interpolation='nearest')
     ax.set_xlabel('LOS bin (0=near source, -1=near z_end)')
     ax.set_ylabel('galaxy index')
-    ax.set_title(f"{args.prefix}: mean ionized fraction per pixel, across {n_sim} draws")
-    fig.colorbar(im, ax=ax, label='mean(theta)')
+    ax.set_title(f"{args.prefix}: mean neutral fraction per pixel, across {n_sim} draws")
+    fig.colorbar(im, ax=ax, label='mean(theta) = P(neutral)')
     out2 = os.path.join(args.output_dir, f'{args.prefix}_mean_pixel_map.png')
     fig.savefig(out2, dpi=130, bbox_inches='tight')
     plt.close(fig)
     print(f"Saved {out2}")
 
-    # ── Histogram of per-draw ionized fraction ──────────────────────────────
+    # ── Histogram of per-draw neutral fraction ──────────────────────────────
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.hist(ionized_frac_per_draw, bins=30, color='steelblue', edgecolor='k', alpha=0.8)
-    ax.set_xlabel('ionized fraction (mean over all pixels in one draw)')
+    ax.hist(neutral_frac_per_draw, bins=30, color='steelblue', edgecolor='k', alpha=0.8)
+    ax.set_xlabel('neutral fraction (mean over all pixels in one draw)')
     ax.set_ylabel('count')
-    ax.set_title(f"{args.prefix}: per-draw ionized fraction, {n_sim} sims")
-    out3 = os.path.join(args.output_dir, f'{args.prefix}_ionized_frac_hist.png')
+    ax.set_title(f"{args.prefix}: per-draw neutral fraction, {n_sim} sims")
+    out3 = os.path.join(args.output_dir, f'{args.prefix}_neutral_frac_hist.png')
     fig.savefig(out3, dpi=130, bbox_inches='tight')
     plt.close(fig)
     print(f"Saved {out3}")

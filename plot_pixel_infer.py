@@ -1,9 +1,15 @@
 """
 Visual inspection of `sbi_pixel_field.py infer` output (`pixel_infer.npz`):
-the marginal per-pixel ionization probability map, a handful of resampled
-joint map draws, and the importance-weight distribution behind the reported
-effective sample size (ESS) -- low ESS means a few draws dominate the
-weighted average/resample, which the weight histogram makes directly visible.
+the marginal per-pixel neutral-fraction probability map, a handful of
+resampled joint map draws, and the importance-weight distribution behind the
+reported effective sample size (ESS) -- low ESS means a few draws dominate
+the weighted average/resample, which the weight histogram makes directly
+visible.
+
+Convention (from `discretize_to_fixed_bins` in lyabubbles/lightcone_field.py):
+theta = (weighted-mean x_HI >= threshold), i.e. theta=1 means NEUTRAL,
+theta=0 means IONIZED. (Fixed 2026-08-14 -- this file previously labeled it
+backwards throughout.)
 
 Standalone (numpy/matplotlib only), runs anywhere `pixel_infer.npz` is.
 
@@ -51,9 +57,9 @@ def main():
                    interpolation='nearest')
     ax.set_xlabel('LOS bin (0=near source, -1=near z_end)')
     ax.set_ylabel('galaxy index')
-    ax.set_title(f"Marginal P(ionized) per pixel -- ESS={ess:.1f}/{pool_size} "
+    ax.set_title(f"Marginal P(neutral) per pixel -- ESS={ess:.1f}/{pool_size} "
                 f"({100 * ess / pool_size:.1f}%)")
-    fig.colorbar(im, ax=ax, label='P(ionized)')
+    fig.colorbar(im, ax=ax, label='P(neutral)')
     out1 = os.path.join(args.output_dir, 'infer_marginal_map.png')
     fig.savefig(out1, dpi=130, bbox_inches='tight')
     plt.close(fig)
@@ -75,7 +81,7 @@ def main():
         ax.set_ylabel('galaxy index')
     for ax in axes.flat[n_examples:]:
         ax.axis('off')
-    fig.colorbar(im2, ax=axes, shrink=0.6, label='0=neutral, 1=ionized')
+    fig.colorbar(im2, ax=axes, shrink=0.6, label='0=ionized, 1=neutral')
     fig.suptitle(f"{n_examples} resampled joint map draws (SIR from the reweighted pool)")
     out2 = os.path.join(args.output_dir, 'infer_joint_examples.png')
     fig.savefig(out2, dpi=130, bbox_inches='tight')
