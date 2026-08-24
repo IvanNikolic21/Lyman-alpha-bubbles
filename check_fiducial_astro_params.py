@@ -45,6 +45,8 @@ z_step_factor=1.05 node-redshift spacing is a first guess, not tuned.
 Needs: py21cmfast 4.x on the cluster. Does NOT need the real galaxy catalog
 -- this only checks the astro_params in isolation.
 """
+import os
+
 import numpy as np
 import py21cmfast as p21c
 
@@ -64,20 +66,48 @@ FIDUCIAL_OVERRIDES = dict(
     OMb=0.04952,
     POWER_INDEX=0.9626,
     SIGMA_8=0.8118,
-    # UNVERIFIED field names -- if from_template() errors specifically on
-    # HII_DIM or BOX_LEN, check `help(p21c.SimulationOptions)` for the v4
-    # names and fix here.
+    # Confirmed valid SimulationOptions override kwargs (HII_DIM via the
+    # official 'Qin20' template example; N_THREADS via its own docs entry).
     HII_DIM=256,
     BOX_LEN=384,
+    # SimulationOptions default is N_THREADS=1 -- MUST match --cpus-per-task
+    # in the #SBATCH line (the real one, not just what you meant to request
+    # -- see the ##SBATCH silent-comment trap in cluster-workflow-notes
+    # memory). ADJUST to your actual allocation.
+    N_THREADS=16,
 )
 
+# ---- where things get saved ----
+# CACHE_DIR: the RAW 21cmFAST outputs (every field for every one of the
+# ~25 node redshifts below: density/velocity/ionization/brightness_temp
+# etc, whatever this run configuration produces) -- OutputCache decides the
+# on-disk layout/filenames itself, hashed by input params, same convention
+# as the existing snapshot table's path in lyabubbles/lightcone_field.py.
+# This is a MUCH bigger footprint than the ~260 MB/lightcone estimate from
+# the campaign-planning conversation -- that number was for the 2 fields
+# (x_HI + density) worth keeping for actual SBI training use, not
+# everything py21cmfast writes internally per timestep. Budget a few GB for
+# this one pilot run; ADJUST the path to somewhere on your 2.5 TB.
 CACHE_DIR = '/lustre/astro/ivannik/21cmFAST_cache/tau_uvlf_check/'  # ADJUST
+# OUT_DIR: the two small .npz result files this script writes (KB-scale).
+# Made explicit/absolute rather than left as relative paths (which would've
+# landed wherever the job's working directory happened to be) so they're
+# easy to find afterward.
+OUT_DIR = '/lustre/astro/ivannik/21cmFAST_cache/tau_uvlf_check_results/'  # ADJUST
+os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(OUT_DIR, exist_ok=True)
+
 Z_MIN = 5.3     # matches Z_END_DEFAULT in lyabubbles/lightcone_field.py
 Z_MAX = 20.0    # generous margin past full neutrality -- CHECK below, may need raising
 
 node_z = p21c.wrapper.inputs.get_logspaced_redshifts(
     min_redshift=Z_MIN, z_step_factor=1.05, max_redshift=Z_MAX,
 )
+# z_step_factor=1.05 over z=5.3->20 gives ~25 node redshifts (log((1+Z_MAX)
+# /(1+Z_MIN)) / log(z_step_factor) = log(21/6.3)/log(1.05) =~ 25) -- a
+# modest number of coeval-timestep evaluations, not the dominant cost
+# driver; HII_DIM=256 per-timestep cost matters more. Still unbenchmarked
+# end-to-end, hence the generous walltime request below.
 
 inputs = p21c.InputParameters.from_template(
     ['simple'],
@@ -107,9 +137,10 @@ Muv, Mh, lf = p21c.compute_luminosity_function(
 )
 # Muv, lf shapes: (n_z, n_Muv_bins).
 
-np.savez('uvlf_fiducial_check.npz', Muv=Muv, Mh=Mh, lf=lf,
+uvlf_out = os.path.join(OUT_DIR, 'uvlf_fiducial_check.npz')
+np.savez(uvlf_out, Muv=Muv, Mh=Mh, lf=lf,
          redshifts=UVLF_REDSHIFTS, astro_overrides=FIDUCIAL_OVERRIDES)
-print("[UVLF] saved uvlf_fiducial_check.npz")
+print(f"[UVLF] saved {uvlf_out}")
 for i, z in enumerate(UVLF_REDSHIFTS):
     # Quick sanity print only -- no observational UV LF table is wired into
     # this repo yet, so eyeball this by hand against e.g. Bouwens+2021 /
@@ -157,9 +188,10 @@ print(f"\n[tau_e] fiducial astro_params give tau_e = {tau_e:.4f}")
 print(f"[tau_e] Planck 2018: {TAU_PLANCK} +/- {TAU_PLANCK_ERR}  "
       f"({n_sigma:+.2f} sigma from fiducial)")
 
-np.savez('tau_fiducial_check.npz', z_hist=z_hist, xHI_hist=xHI_hist,
+tau_out = os.path.join(OUT_DIR, 'tau_fiducial_check.npz')
+np.savez(tau_out, z_hist=z_hist, xHI_hist=xHI_hist,
          tau_e=tau_e, astro_overrides=FIDUCIAL_OVERRIDES)
-print("[tau_e] saved tau_fiducial_check.npz")
+print(f"[tau_e] saved {tau_out}")
 
 # This lightcone's 5.3-20 span covers the ~6.5-8.3 SBI training window
 # (z_end..z_hi) within it -- it can double as the first of the ~40-50
