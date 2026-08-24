@@ -436,6 +436,64 @@ def get_muv(
     return UV_list
 
 
+# Tang et al. 2024 (arXiv:2408.01507), Table 3: log-normal fits to the
+# observed Lya EW distribution, p(x) = 1/(sqrt(2 pi) sigma x) *
+# exp(-(ln(x)-mu)^2 / (2 sigma^2)), parametrized by e^mu (Angstrom) and
+# sigma per (redshift bin, field) sample. No Muv dependence in this paper --
+# field-to-field variance within the same z bin is real (see paper's EGS
+# no-reduced-transmission finding). 'z6.5-8.0' (all fields, N=153) is the
+# best redshift match to this project's real catalog (z~6.9-7.3) and is the
+# default sample.
+TANG24_EW_PARAMS = {
+    'z6.5-8.0':             (5.0, 1.74),  # all fields, N=153 (default)
+    'z8.0-10.0':            (2.7, 1.59),  # all fields, N=36
+    'z6.5-8.0_egs':         (7.1, 1.98),  # EGS only, N=46
+    'z6.5-8.0_goods_a2744': (3.9, 1.66),  # GOODS+Abell2744 only, N=107
+}
+
+# Tang et al. 2024 (arXiv:2402.06070), Table 2: log-normal Lya EW fit (same
+# p(x) functional form as above) split into 3 EQUAL-N Muv terciles at z~5-6,
+# 714 LBGs total (238/bin). Unlike TANG24_EW_PARAMS above, this table DOES
+# show an Muv trend (brighter -> lower EW, the well-known anti-correlation).
+# The paper only gives these 3 discrete bins, not a continuous fit -- the
+# interpolation/extrapolation below is OUR addition, not in the paper.
+# Selected via Tang_sample='muv_interp'.
+_TANG24A_MUV_ANCHORS  = np.array([-19.5, -18.5, -17.5])  # bright -> faint
+_TANG24A_MUV_EMU      = np.array([10.0, 16.0, 27.0])     # e^mu (Angstrom)
+_TANG24A_MUV_SIGMA    = np.array([1.75, 1.51, 0.99])     # sigma (dex)
+# Interpolation/extrapolation is done in LOG space for both e^mu and sigma
+# (i.e. on mu=ln(e^mu) and ln(sigma)) so that exponentiating back always
+# gives a strictly positive result -- linearly extrapolating e^mu/sigma
+# directly can and does cross zero for bright-enough Muv (caught by a
+# standalone numeric spot-check: Muv=-22 gave e^mu<0 -> EW=nan).
+_TANG24A_MUV_LOG_EMU   = np.log(_TANG24A_MUV_EMU)
+_TANG24A_MUV_LOG_SIGMA = np.log(_TANG24A_MUV_SIGMA)
+
+
+def _linterp_extrap(x, xp, fp):
+    """Piecewise-linear interpolation that also linearly extrapolates beyond
+    the anchor range (np.interp alone just clamps to the edge value), using
+    the nearest segment's slope. `xp` must be sorted ascending."""
+    x = np.asarray(x, dtype=float)
+    y = np.interp(x, xp, fp)
+    slope_lo = (fp[1] - fp[0]) / (xp[1] - xp[0])
+    slope_hi = (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
+    y = np.where(x < xp[0], fp[0] + slope_lo * (x - xp[0]), y)
+    y = np.where(x > xp[-1], fp[-1] + slope_hi * (x - xp[-1]), y)
+    return y
+
+
+def _tang_muv_interp_params(muv):
+    """mu(Muv), sigma(Muv) for Tang_sample='muv_interp' -- linear
+    interpolation/extrapolation in log space across _TANG24A_MUV_ANCHORS
+    (see comment above the anchor arrays for why). Extrapolation beyond the
+    paper's -19.5..-17.5 sampled range is a genuine extrapolation, flagged
+    as a caveat."""
+    mu = _linterp_extrap(muv, _TANG24A_MUV_ANCHORS, _TANG24A_MUV_LOG_EMU)
+    sigma = np.exp(_linterp_extrap(muv, _TANG24A_MUV_ANCHORS, _TANG24A_MUV_LOG_SIGMA))
+    return mu, sigma
+
+
 def p_EW(
         Muv,
         beta=-2,
@@ -444,14 +502,25 @@ def p_EW(
         high_prob_emit=False,
         EW_fixed=False,
         gauss_distr=False,
-        Tang_distr=False
+        Tang_distr=False,
+        Tang_sample='z6.5-8.0',
+        GH_distr=False,
 ):
     """
     Function shall give sample from the distribution
     """
 
-    if gauss_distr and Tang_distr:
-        raise ValueError("Both Gauss and Tang+24 distributions are set to True")
+    if sum([gauss_distr, Tang_distr, GH_distr]) > 1:
+        raise ValueError(
+            "Only one of gauss_distr, Tang_distr, GH_distr may be set to True"
+        )
+    if GH_distr and mean:
+        raise NotImplementedError(
+            "GH_distr has no closed-form population mean; call with mean=False"
+        )
+    if Tang_sample not in TANG24_EW_PARAMS and Tang_sample != 'muv_interp':
+        raise ValueError(f"Tang_sample must be one of "
+                          f"{list(TANG24_EW_PARAMS) + ['muv_interp']}, got {Tang_sample!r}")
 
     def A(m):
         if high_prob_emit:
@@ -462,11 +531,54 @@ def p_EW(
     def W(m):
         return 31 + 12 * np.tanh(4 * (m + 20.25))
 
-    def p_Tang(W):
-        mu = np.log(5.0)
-        sigma = 1.74
+    def p_Tang(W, muv=None):
+        if Tang_sample == 'muv_interp':
+            mu, sigma = _tang_muv_interp_params(muv)
+        else:
+            ew0, sigma = TANG24_EW_PARAMS[Tang_sample]
+            mu = np.log(ew0)
         return 1 / np.sqrt(2 * np.pi) / sigma / W * np.exp(
             -(np.log(W) - mu) ** 2 / 2 / sigma ** 2)
+
+    def sample_GH(muv_arr, beta_arr):
+        """Gagnon-Hartman et al. 2026 (arXiv:2602.13389) 'quick implementation'
+        (their Sec. 2.5) sampler: draws (log10 L_Lya, dv, log10 L_Ha) from a
+        multivariate Gaussian conditioned on Muv (via 3 independent Gaussian
+        eigenvector components + a fixed basis-matrix rotation), then converts
+        the emergent Lya luminosity to EW using the same
+        C_const/L_UV_mean relation used elsewhere in this function.
+
+        CAVEAT: coefficients below were extracted from an automated HTML
+        parse of the paper, not the primary PDF -- spot-checked with a
+        standalone numeric sanity test (plausible EW/dv ranges, correct
+        EW-vs-Muv anti-correlation trend) but not independently re-verified
+        against the paper's Appendix C parameter table. Also unresolved:
+        whether the quoted Gaussian widths (0.7, 0.49, 0.26) are sigma or
+        sigma^2 -- taken here as sigma (astronomy-paper convention).
+        Unlike gauss_distr/Tang_distr, this model has no separate
+        emitter-duty-cycle gate (A(Muv)) -- every draw returns a nonzero EW,
+        by design (see modeling-improvements-roadmap memory).
+        """
+        muv_arr = np.atleast_1d(muv_arr).astype(float)
+        beta_arr = np.atleast_1d(beta_arr).astype(float)
+        m185 = muv_arr + 18.5
+        u1 = np.random.normal(0.087 * m185 - 0.51, 0.7)
+        u2 = np.random.normal(-0.57 * m185 - 0.85, 0.49)
+        u3 = np.random.normal(-0.38 * m185 - 0.31, 0.26)
+        A_mat = np.array([[1, 1, 1 / 3], [-1, 1, -1], [-1 / 3, 1, 1]])
+        u = np.stack([u1, u2, u3], axis=0)  # (3, N)
+        x0 = A_mat @ u  # (3, N)
+        mu_lya = np.array([42.47, 200.18, 42.03])
+        sig_lya = np.array([0.42, 99.7, 0.39])
+        x = sig_lya[:, None] * x0 + mu_lya[:, None]
+        log10_L_Lya, dv_gh, log10_L_Ha = x
+        L_Lya = 10 ** log10_L_Lya
+
+        C_const_gh = 2.47 * 1e15 * u.Hz / 1216 / u.Angstrom * (
+                1500 / 1216) ** (-beta_arr - 2)
+        L_UV_mean_gh = 10 ** (-0.4 * (muv_arr - 51.6))
+        EW_gh = L_Lya / (C_const_gh.value * L_UV_mean_gh)
+        return EW_gh, L_Lya
 
     if EW_fixed:
         if hasattr(beta, '__len__'):
@@ -494,6 +606,13 @@ def p_EW(
             return W(Muv) * A(Muv)
 
     if hasattr(Muv, '__len__'):
+        if GH_distr:
+            EWs, lum_alpha = sample_GH(Muv, beta)
+            if return_lum:
+                return EWs, lum_alpha
+            else:
+                return EWs
+
         EWs = np.zeros((len(Muv)))
         if return_lum:
             lum_alpha = np.zeros((len(Muv)))
@@ -501,16 +620,15 @@ def p_EW(
 
             if Tang_distr:
                 EW_cumsum_tang = integrate.cumulative_trapezoid(
-                    p_Tang(Ws),
+                    p_Tang(Ws, muv=muvi),
                     Ws
                 )
                 cumsum_Tang = EW_cumsum_tang / EW_cumsum_tang[-1]
                 rn = np.random.uniform(size=1)
-                EW_new_Tang = np.interp(
+                EW_now = np.interp(
                     rn,
                     np.concatenate((np.array([0.0]), cumsum_Tang)), Ws)[0]
-
-            if np.random.binomial(1, A(muvi)):
+            elif np.random.binomial(1, A(muvi)):
                 if not gauss_distr:
                     EW_cumsum = integrate.cumulative_trapezoid(
                         1 / W(muvi) * np.exp(-Ws / W(muvi)), Ws)
@@ -528,10 +646,7 @@ def p_EW(
             else:
                 EW_now = 0.0
 
-            if Tang_distr:
-                EWs[i] = EW_new_Tang
-            else:
-                EWs[i] = EW_now
+            EWs[i] = EW_now
             if return_lum:
                 C_const = 2.47 * 1e15 * u.Hz / 1216 / u.Angstrom * (
                             1500 / 1216) ** (-(beti) - 2)
@@ -543,9 +658,16 @@ def p_EW(
             return EWs
     else:
 
+        if GH_distr:
+            EW_now, lum_now = sample_GH(Muv, beta)
+            if return_lum:
+                return EW_now[0], lum_now[0]
+            else:
+                return EW_now[0]
+
         if Tang_distr:
             EW_cumsum_tang = integrate.cumulative_trapezoid(
-                p_Tang(Ws),
+                p_Tang(Ws, muv=Muv),
                 Ws
             )
             cumsum_Tang = EW_cumsum_tang / EW_cumsum_tang[-1]

@@ -93,6 +93,9 @@ def get_content(
         cache_dir='/home/inikolic/projects/Lyalpha_bubbles/_cache/',
         main_dir='/home/inikolic/projects/Lyalpha_bubbles/code/Lyman-alpha-bubbles',
         gauss_distr=False,
+        Tang_distr=False,
+        Tang_sample='z6.5-8.0',
+        GH_distr=False,
 ):
     """
         Function fills up the container which has all of the forward model parts
@@ -171,6 +174,10 @@ def get_content(
                 np.full(n_inside_tau, beti),
                 high_prob_emit=high_prob_emit,
                 EW_fixed=EW_fixed,
+                gauss_distr=gauss_distr,
+                Tang_distr=Tang_distr,
+                Tang_sample=Tang_sample,
+                GH_distr=GH_distr,
             )
             #else:
             #    lae_now_i = np.array(

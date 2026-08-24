@@ -202,7 +202,8 @@ def _simulate_worker(task):
 
 
 def _generate_split(meta, n_sim, batch_size, n_workers, main_dir, n_los,
-                    z_b_edges, z_e_edges, seed, output_dir, prefix):
+                    z_b_edges, z_e_edges, seed, output_dir, prefix,
+                    ew_model='exponential'):
     """Bulk-generate `n_sim` (theta, x) pairs in resumable batches of
     `batch_size`, saved as `{prefix}_batch_{i:05d}.npz` -- mirrors
     `sbi_real_data.py::_generate_split`'s resumable-batching/progress-
@@ -232,7 +233,7 @@ def _generate_split(meta, n_sim, batch_size, n_workers, main_dir, n_los,
 
         rdr._refresh_mc_state(
             meta['muv'], meta['redshifts'], meta['x_gal'], meta['y_gal'], meta['z_gal'],
-            meta['beta'], meta['z0'], this_batch, main_dir,
+            meta['beta'], meta['z0'], this_batch, main_dir, ew_model=ew_model,
         )
 
         theta_batch, tau_batch = _compute_pixel_theta_and_tau_batch(
@@ -287,10 +288,11 @@ def run_simulate(args):
 
     n_sim_val = args.n_sim_val if args.n_sim_val is not None else max(1, args.n_sim // 5)
     _generate_split(meta, args.n_sim, args.batch_size, args.n_workers, args.main_dir,
-                    args.n_los, z_b_edges, z_e_edges, args.seed, args.output_dir, prefix='train')
+                    args.n_los, z_b_edges, z_e_edges, args.seed, args.output_dir, prefix='train',
+                    ew_model=args.ew_model)
     _generate_split(meta, n_sim_val, args.batch_size, args.n_workers, args.main_dir,
                     args.n_los, z_b_edges, z_e_edges, args.seed + 1_000_000, args.output_dir,
-                    prefix='val')
+                    prefix='val', ew_model=args.ew_model)
     print(f"[simulate] done: {args.n_sim} train + {n_sim_val} val sims "
           f"({len(meta['x_gal'])} galaxies x {args.n_los} LOS bins each) in {args.output_dir}",
           flush=True)
@@ -463,6 +465,10 @@ def _add_catalog_args(p):
                    default='/groups/astro/ivannik/programs/Lyman-alpha-bubbles/')
     p.add_argument('--n_los', type=int, default=75,
                    help='LOS bins per galaxy (discussed range 50-100).')
+    p.add_argument('--ew_model', type=str, default='exponential',
+                   choices=rdr.EW_MODEL_CHOICES,
+                   help="Intrinsic Lya EW distribution (only affects `simulate`, ignored by "
+                        "`train_nre`/`infer`) -- see real_data_run.EW_MODEL_CHOICES docstring.")
 
 
 if __name__ == '__main__':

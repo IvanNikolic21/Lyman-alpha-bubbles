@@ -510,8 +510,49 @@ def _load_catalog_and_priors(lya_path: str, properties_path: str, z_lo: float, z
     )
 
 
+# Intrinsic Lya EW model choice, threaded from CLI --ew_model down to the
+# p_EW() call inside get_content()/_get_content_par() (lyabubbles/speed_up.py).
+# 'exponential' is the historical default (Mason-et-al-style A(Muv)/W(Muv)
+# duty-cycle + exponential draw); 'gauss' swaps the exponential for a
+# half-Gaussian with the same A(Muv)/W(Muv). The rest bypass the duty-cycle
+# gate entirely, supplying their own complete EW distribution (see
+# modeling-improvements-roadmap memory):
+#   'tang'/'tang_z8.0-10.0'/'tang_egs'/'tang_goods_a2744' -- log-normal fits
+#     from Tang et al. 2024 (arXiv:2408.01507), Table 3 -- see
+#     lyabubbles.galaxy_prop.TANG24_EW_PARAMS for the 4 (redshift bin, field)
+#     samples this maps to. 'tang' = the all-fields z=6.5-8.0 fit (N=153),
+#     the best redshift match to this project's real catalog (z~6.9-7.3).
+#   'tang_muv' -- log-normal fit from a DIFFERENT Tang et al. 2024 paper
+#     (arXiv:2402.06070, Table 2), whose 3 Muv-tercile bins (median
+#     Muv=-19.5/-18.5/-17.5) DO capture the Muv-EW anti-correlation this
+#     project's default exponential model already has via A(Muv)/W(Muv).
+#     The paper gives only 3 discrete bins; lyabubbles.galaxy_prop
+#     linearly interpolates/extrapolates (mu, sigma) vs Muv across them --
+#     see _tang_muv_interp_params, an addition not literally in the paper.
+#   'gagnon_hartman' -- Gagnon-Hartman et al. 2026 (arXiv:2602.13389) Sec. 2.5.
+EW_MODEL_CHOICES = ('exponential', 'gauss', 'tang', 'tang_z8.0-10.0',
+                    'tang_egs', 'tang_goods_a2744', 'tang_muv', 'gagnon_hartman')
+_TANG_SAMPLE_FOR_MODEL = {
+    'tang':               'z6.5-8.0',
+    'tang_z8.0-10.0':     'z8.0-10.0',
+    'tang_egs':           'z6.5-8.0_egs',
+    'tang_goods_a2744':   'z6.5-8.0_goods_a2744',
+    'tang_muv':           'muv_interp',
+}
+_EW_MODEL_FLAGS = {
+    'exponential':    dict(gauss_distr=False, Tang_distr=False, GH_distr=False),
+    'gauss':          dict(gauss_distr=True,  Tang_distr=False, GH_distr=False),
+    'gagnon_hartman': dict(gauss_distr=False, Tang_distr=False, GH_distr=True),
+    **{
+        model: dict(gauss_distr=False, Tang_distr=True, GH_distr=False, Tang_sample=sample)
+        for model, sample in _TANG_SAMPLE_FOR_MODEL.items()
+    },
+}
+
+
 def _refresh_mc_state(muv, redshifts, x_gal, y_gal, z_gal, beta, z0,
-                      n_inside_tau: int, main_dir: str) -> None:
+                      n_inside_tau: int, main_dir: str,
+                      ew_model: str = 'exponential') -> None:
     """Draw a fresh batch of `n_inside_tau` stochastic MC realizations (line
     profile, intrinsic EW, outside-bubble sightline) via `get_content`, and
     populate the MC-draw-dependent `_S` fields. Call once (large
@@ -519,7 +560,11 @@ def _refresh_mc_state(muv, redshifts, x_gal, y_gal, z_gal, beta, z0,
     (small/1 `n_inside_tau`) for SBI's bulk simulation generation
     (sbi_real_data.py) -- each call is an independent fresh draw. Requires
     `_load_catalog_and_priors` to have already populated the catalog-fixed
-    `_S` fields this reads (`tau_cgm`, `z_wv`, `tau_wv_pref`, `I_z_end`)."""
+    `_S` fields this reads (`tau_cgm`, `z_wv`, `tau_wv_pref`, `I_z_end`).
+    `ew_model` selects the intrinsic Lya EW distribution -- see
+    EW_MODEL_CHOICES / _EW_MODEL_FLAGS above."""
+    if ew_model not in _EW_MODEL_FLAGS:
+        raise ValueError(f"ew_model must be one of {EW_MODEL_CHOICES}, got {ew_model!r}")
     n_gal = len(muv)
     cont_filled = get_content(
         muv, redshifts, x_gal, y_gal, z_gal,
@@ -527,7 +572,8 @@ def _refresh_mc_state(muv, redshifts, x_gal, y_gal, z_gal, beta, z0,
         include_muv_unc=False, fwhm_true=False,
         redshift=z0, xh_unc=True, high_prob_emit=False,
         EW_fixed=False, cache=None, AH22_model=False,
-        main_dir=main_dir, cache_dir=None, gauss_distr=False,
+        main_dir=main_dir, cache_dir=None,
+        **_EW_MODEL_FLAGS[ew_model],
     )
 
     j_s      = np.array([cont_filled.j_s_full[i] for i in range(n_gal)])
@@ -603,14 +649,16 @@ def _refresh_mc_state(muv, redshifts, x_gal, y_gal, z_gal, beta, z0,
 def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
                 n_inside_tau: int, z_min: float, muv_max: float, main_dir: str,
                 r_max: float = None, prefer: str = 'grating',
-                legacy_catalog_path: str = None) -> dict:
+                legacy_catalog_path: str = None,
+                ew_model: str = 'exponential') -> dict:
     """Load the catalog, select the redshift window, convert coordinates,
     build the data-driven prior, and populate `_S` with everything the
     likelihood needs. Returns the (x, y, z, prior_lo, prior_hi, ra0, dec0, z0)
     metadata needed to interpret/rerun the fit. Thin wrapper around
     `_load_catalog_and_priors` + `_refresh_mc_state` (kept separate so the
     SBI simulator can call the catalog-loading part once and the stochastic
-    MC-draw part many times -- see both functions' docstrings)."""
+    MC-draw part many times -- see both functions' docstrings). `ew_model`
+    is forwarded to `_refresh_mc_state` -- see EW_MODEL_CHOICES."""
     meta = _load_catalog_and_priors(
         lya_path, properties_path, z_lo, z_hi, z_min, muv_max, main_dir,
         r_max=r_max, prefer=prefer, legacy_catalog_path=legacy_catalog_path,
@@ -618,6 +666,7 @@ def build_state(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
     _refresh_mc_state(
         meta['muv'], meta['redshifts'], meta['x_gal'], meta['y_gal'], meta['z_gal'],
         meta['beta'], meta['z0'], n_inside_tau, main_dir,
+        ew_model=ew_model,
     )
     return meta
 
@@ -685,10 +734,10 @@ def _run_dynesty(loglike, prior_transform, ndim, param_names,
 def run(lya_path: str, properties_path: str, z_lo: float, z_hi: float, n_inside_tau: int,
         nlive: int, dlogz: float, n_workers: int, z_min: float, muv_max: float,
         main_dir: str, r_max: float = None, prefer: str = 'grating',
-        legacy_catalog_path: str = None) -> dict:
+        legacy_catalog_path: str = None, ew_model: str = 'exponential') -> dict:
     meta = build_state(lya_path, properties_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
                        main_dir, r_max=r_max, prefer=prefer,
-                       legacy_catalog_path=legacy_catalog_path)
+                       legacy_catalog_path=legacy_catalog_path, ew_model=ew_model)
     fit  = _run_dynesty(_log_likelihood_ew, _prior_transform, NDIM, PARAM_NAMES,
                         nlive, dlogz, n_workers, label='run')
     return dict(**meta, **fit)
@@ -697,13 +746,14 @@ def run(lya_path: str, properties_path: str, z_lo: float, z_hi: float, n_inside_
 def run_bayes_factor(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
                      n_inside_tau: int, nlive: int, dlogz: float, n_workers: int,
                      z_min: float, muv_max: float, main_dir: str, r_max: float = None,
-                     prefer: str = 'grating', legacy_catalog_path: str = None) -> dict:
+                     prefer: str = 'grating', legacy_catalog_path: str = None,
+                     ew_model: str = 'exponential') -> dict:
     """Fit M1 (1 bubble) and M2 (2 bubbles) to the same galaxy sample and
     compare their Bayesian evidence. `_S` is built once and shared by both
     fits (only the likelihood/prior/ndim differ)."""
     meta = build_state(lya_path, properties_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
                        main_dir, r_max=r_max, prefer=prefer,
-                       legacy_catalog_path=legacy_catalog_path)
+                       legacy_catalog_path=legacy_catalog_path, ew_model=ew_model)
 
     print("--- Model 1: single bubble ---", flush=True)
     fit1 = _run_dynesty(_log_likelihood_ew, _prior_transform, NDIM, PARAM_NAMES,
@@ -743,12 +793,13 @@ def run_bayes_factor(lya_path: str, properties_path: str, z_lo: float, z_hi: flo
 def run_model_comparison(lya_path: str, properties_path: str, z_lo: float, z_hi: float,
                          n_inside_tau: int, nlive: int, dlogz: float, n_workers: int,
                          z_min: float, muv_max: float, main_dir: str, r_max: float = None,
-                         prefer: str = 'grating', legacy_catalog_path: str = None) -> dict:
+                         prefer: str = 'grating', legacy_catalog_path: str = None,
+                         ew_model: str = 'exponential') -> dict:
     """Fit M1 (1 bubble), M2 (2 bubbles), and M3 (3 bubbles) to the same galaxy
     sample and compare their Bayesian evidence pairwise."""
     meta = build_state(lya_path, properties_path, z_lo, z_hi, n_inside_tau, z_min, muv_max,
                        main_dir, r_max=r_max, prefer=prefer,
-                       legacy_catalog_path=legacy_catalog_path)
+                       legacy_catalog_path=legacy_catalog_path, ew_model=ew_model)
 
     print("--- Model 1: single bubble ---", flush=True)
     fit1 = _run_dynesty(_log_likelihood_ew, _prior_transform, NDIM, PARAM_NAMES,
@@ -828,6 +879,13 @@ if __name__ == '__main__':
                              '(a deep spectroscopic survey\'s LOS extent is typically far '
                              'larger than any plausible single bubble).')
     parser.add_argument('--n_inside_tau', type=int, default=200)
+    parser.add_argument('--ew_model', type=str, default='exponential', choices=EW_MODEL_CHOICES,
+                        help="Intrinsic Lya EW distribution. 'exponential' (default, historical) "
+                             "and 'gauss' keep the Muv-dependent A(Muv) emitter duty-cycle; the "
+                             "'tang*' variants (Tang et al. 2024, arXiv:2408.01507, Table 3) and "
+                             "'gagnon_hartman' (arXiv:2602.13389) supply their own complete "
+                             "distribution (no separate duty-cycle gate) -- see EW_MODEL_CHOICES "
+                             "docstring above for the exact source of each.")
     parser.add_argument('--nlive', type=int, default=300)
     parser.add_argument('--dlogz', type=float, default=0.5)
     parser.add_argument('--n_workers', type=int, default=8)
@@ -852,7 +910,7 @@ if __name__ == '__main__':
             args.lya_catalog, args.properties_catalog, args.z_lo, args.z_hi, args.n_inside_tau,
             args.nlive, args.dlogz, args.n_workers, args.z_min, args.muv_max,
             args.main_dir, r_max=args.r_max, prefer=args.prefer,
-            legacy_catalog_path=args.legacy_catalog,
+            legacy_catalog_path=args.legacy_catalog, ew_model=args.ew_model,
         )
         out_file = os.path.join(args.output_dir, f'mc_real_data_{fname_stem}.npz')
     elif args.bayes_factor:
@@ -860,7 +918,7 @@ if __name__ == '__main__':
             args.lya_catalog, args.properties_catalog, args.z_lo, args.z_hi, args.n_inside_tau,
             args.nlive, args.dlogz, args.n_workers, args.z_min, args.muv_max,
             args.main_dir, r_max=args.r_max, prefer=args.prefer,
-            legacy_catalog_path=args.legacy_catalog,
+            legacy_catalog_path=args.legacy_catalog, ew_model=args.ew_model,
         )
         out_file = os.path.join(args.output_dir, f'bf_real_data_{fname_stem}.npz')
     else:
@@ -868,7 +926,7 @@ if __name__ == '__main__':
             args.lya_catalog, args.properties_catalog, args.z_lo, args.z_hi, args.n_inside_tau,
             args.nlive, args.dlogz, args.n_workers, args.z_min, args.muv_max,
             args.main_dir, r_max=args.r_max, prefer=args.prefer,
-            legacy_catalog_path=args.legacy_catalog,
+            legacy_catalog_path=args.legacy_catalog, ew_model=args.ew_model,
         )
         out_file = os.path.join(args.output_dir, f'real_data_{fname_stem}.npz')
 

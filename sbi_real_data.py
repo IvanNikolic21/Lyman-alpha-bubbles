@@ -290,7 +290,7 @@ def _simulate_worker(task):
 
 
 def _generate_split(meta, n_bub, n_sim, batch_size, n_workers, main_dir,
-                    seed, output_dir, prefix):
+                    seed, output_dir, prefix, ew_model='exponential'):
     """Bulk-generate `n_sim` (theta, x) pairs in resumable batches of
     `batch_size`, saved as `{prefix}_batch_{i:05d}.npz`. Each batch calls
     `_refresh_mc_state` (unchanged) and `_compute_lightcone_tau_batch` (new,
@@ -329,7 +329,7 @@ def _generate_split(meta, n_bub, n_sim, batch_size, n_workers, main_dir,
 
         rdr._refresh_mc_state(
             meta['muv'], meta['redshifts'], meta['x_gal'], meta['y_gal'], meta['z_gal'],
-            meta['beta'], meta['z0'], this_batch, main_dir,
+            meta['beta'], meta['z0'], this_batch, main_dir, ew_model=ew_model,
         )
 
         u_batch = rng_master.uniform(size=(this_batch, ndim))
@@ -378,9 +378,11 @@ def run_simulate(args):
     )
     n_sim_val = args.n_sim_val if args.n_sim_val is not None else max(1, args.n_sim // 5)
     _generate_split(meta, args.n_bub, args.n_sim, args.batch_size, args.n_workers,
-                    args.main_dir, args.seed, args.output_dir, prefix='train')
+                    args.main_dir, args.seed, args.output_dir, prefix='train',
+                    ew_model=args.ew_model)
     _generate_split(meta, args.n_bub, n_sim_val, args.batch_size, args.n_workers,
-                    args.main_dir, args.seed + 1_000_000, args.output_dir, prefix='val')
+                    args.main_dir, args.seed + 1_000_000, args.output_dir, prefix='val',
+                    ew_model=args.ew_model)
     print(f"[simulate] done: {args.n_sim} train + {n_sim_val} val sims in {args.output_dir}",
           flush=True)
 
@@ -554,6 +556,10 @@ def _add_catalog_args(p):
     p.add_argument('--main_dir', type=str,
                    default='/groups/astro/ivannik/programs/Lyman-alpha-bubbles/')
     p.add_argument('--n_bub', type=int, default=1, choices=[1, 2, 3])
+    p.add_argument('--ew_model', type=str, default='exponential',
+                   choices=rdr.EW_MODEL_CHOICES,
+                   help="Intrinsic Lya EW distribution (only affects `simulate`, ignored by "
+                        "`train`/`infer`) -- see real_data_run.EW_MODEL_CHOICES docstring.")
 
 
 if __name__ == '__main__':

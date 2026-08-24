@@ -183,6 +183,9 @@ if __name__ == '__main__':
     parser.add_argument('--seed_offset',  type=int,   default=0,
                         help='Add to seed index so multiple runs can use non-overlapping seeds.')
     parser.add_argument('--n_inside_tau', type=int,   default=200)
+    parser.add_argument('--ew_model',     type=str,   default='exponential',
+                        choices=rdr.EW_MODEL_CHOICES,
+                        help='Intrinsic Lya EW distribution -- see real_data_run.EW_MODEL_CHOICES.')
     parser.add_argument('--nlive',        type=int,   default=300)
     parser.add_argument('--dlogz',        type=float, default=0.5)
     parser.add_argument('--n_workers',    type=int,   default=8)
@@ -197,7 +200,7 @@ if __name__ == '__main__':
     rdr.build_state(
         args.lya_catalog, args.properties_catalog, args.z_lo, args.z_hi, args.n_inside_tau,
         args.z_min, args.muv_max, args.main_dir, r_max=args.r_max, prefer=args.prefer,
-        legacy_catalog_path=args.legacy_catalog,
+        legacy_catalog_path=args.legacy_catalog, ew_model=args.ew_model,
     )
 
     all_results = []
