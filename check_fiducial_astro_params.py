@@ -33,14 +33,27 @@ the tau_e/UVLF numbers that follow. If any of those defaults look wrong for
 this project, tell me and we'll override them explicitly instead of
 accepting the template.
 
-Still UNVERIFIED (no py21cmfast available in this session to actually run
-this against): (a) whether HII_DIM/BOX_LEN are still the correct
-SimulationOptions field names in v4 (if the from_template() call below
-errors on these specific kwargs, that's the tell), (b) whether
-run_lightcone(...) returns the final LightCone directly from a plain
-assignment or needs .exhaust_lightcone() -- handled defensively below by
-checking for a `global_xHI` attribute and falling back if absent, (c) the
-z_step_factor=1.05 node-redshift spacing is a first guess, not tuned.
+CONFIRMED WORKING on the cluster (first real run, 2026-08-25): HII_DIM/
+BOX_LEN/N_THREADS as SimulationOptions override kwargs, the 'simple'
+template + from_template() construction, and the whole UV-LF section (ran
+clean apart from two informational warnings -- USE_MINI_HALOS=False means
+only ACG luminosity functions are computed, which matches this project's
+pre-existing intent; USE_TS_FLUCT=False means the 21-cm brightness-
+temperature signal itself isn't accurate before Ts saturates at high z --
+this affects brightness_temp, not x_HI directly, so it's likely fine for
+tau_e/reionization-morphology purposes, but flagged rather than assumed).
+
+FIXED after the first run: RectilinearLightconer.between_redshifts() built
+its own default cosmology instead of using the custom one from
+FIDUCIAL_OVERRIDES, raising "lightconer.cosmo is not the same as
+inputs.cosmo_params.cosmo" -- fixed by passing cosmo=inputs.cosmo_params.cosmo
+explicitly.
+
+Still UNVERIFIED: whether run_lightcone(...) returns the final LightCone
+directly from a plain assignment or needs .exhaust_lightcone() -- handled
+defensively below by checking for a `global_xHI` attribute and falling back
+if absent; the z_step_factor=1.05 node-redshift spacing is a first guess,
+not tuned or benchmarked for cost.
 
 Needs: py21cmfast 4.x on the cluster. Does NOT need the real galaxy catalog
 -- this only checks the astro_params in isolation.
@@ -161,6 +174,11 @@ lcn = p21c.RectilinearLightconer.between_redshifts(
     max_redshift=Z_MAX,
     quantities=("brightness_temp", "xH_box"),
     resolution=inputs.simulation_options.cell_size,
+    # Without this, between_redshifts() builds its own default cosmology,
+    # which doesn't match the custom one set via FIDUCIAL_OVERRIDES
+    # (hlittle/OMm/OMb/...) -- caused the "lightconer.cosmo is not the same
+    # as inputs.cosmo_params.cosmo" ValueError on the first run.
+    cosmo=inputs.cosmo_params.cosmo,
 )
 
 lightcone = p21c.run_lightcone(lightconer=lcn, inputs=inputs, cache=cache, progressbar=True)
