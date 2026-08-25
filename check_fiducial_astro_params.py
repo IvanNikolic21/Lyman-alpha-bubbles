@@ -112,6 +112,13 @@ FIDUCIAL_OVERRIDES = dict(
     # structure than to this tau_e check -- lower priority to resolve.
     RECOMB_MODEL='inhomogeneous',
     PHOTON_CONS_TYPE='z-photoncons',
+    # 'simple' template's R_BUBBLE_MAX=15.0 triggered a UserWarning once
+    # RECOMB_MODEL was changed from 'none' ("You are setting R_BUBBLE_MAX
+    # != 50 when RECOMB_MODEL != 'none'... non-standard... usually occurs
+    # upon manual update of RECOMB_MODEL") -- the warning itself names 50
+    # as the standard pairing, so setting it explicitly rather than leaving
+    # the now-mismatched template default in place.
+    R_BUBBLE_MAX=50.0,
     # Confirmed valid SimulationOptions override kwargs (HII_DIM via the
     # official 'Qin20' template example; N_THREADS via its own docs entry).
     HII_DIM=256,
@@ -144,15 +151,22 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(OUT_DIR, exist_ok=True)
 
 Z_MIN = 5.3     # matches Z_END_DEFAULT in lyabubbles/lightcone_field.py
-Z_MAX = 20.0    # generous margin past full neutrality -- CHECK below, may need raising
+# Raised from an original 20.0: RECOMB_MODEL='inhomogeneous' requires
+# max(node_redshifts) to be ABOVE Z_HEAT_MAX (=35.0, SimulationOptions
+# default, not overridden here) -- 20.0 was below that and raised a
+# ValueError on construction. 40.0 clears it with margin (also physically
+# fine/better -- higher z_max just means a more complete reionization
+# history for tau_e, not a compromise).
+Z_MAX = 40.0    # generous margin past full neutrality AND past Z_HEAT_MAX
 
 node_z = p21c.wrapper.inputs.get_logspaced_redshifts(
     min_redshift=Z_MIN, z_step_factor=1.05, max_redshift=Z_MAX,
 )
-# z_step_factor=1.05 over z=5.3->20 gives ~25 node redshifts (log((1+Z_MAX)
-# /(1+Z_MIN)) / log(z_step_factor) = log(21/6.3)/log(1.05) =~ 25) -- a
-# modest number of coeval-timestep evaluations, not the dominant cost
-# driver; HII_DIM=256 per-timestep cost matters more. Still unbenchmarked
+# z_step_factor=1.05 over z=5.3->40 gives ~38 node redshifts (log((1+Z_MAX)
+# /(1+Z_MIN)) / log(z_step_factor) = log(41/6.3)/log(1.05) =~ 38, up from
+# ~25 when Z_MAX was 20 before the Z_HEAT_MAX fix) -- still a modest number
+# of coeval-timestep evaluations, not the dominant cost driver; HII_DIM=256
+# per-timestep cost matters more. Still unbenchmarked
 # end-to-end, hence the generous walltime request below.
 
 inputs = p21c.InputParameters.from_template(
