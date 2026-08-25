@@ -6,54 +6,68 @@ lightcone campaign (see cluster-storage-expansion memory):
 
 1. UV luminosity function (p21c.compute_luminosity_function) -- purely
    analytic (halo mass function + astro_params), no lightcone needed.
-2. CMB optical depth tau_e (p21c.compute_tau) -- needs a REAL reionization
-   history, so this section runs the first actual lightcone of the
-   campaign: z=5.3->20, wide enough to capture the full x_HI: 0->1
-   transition tau_e needs. Wider (and slower) than a typical ~z=6.5-8.3
-   training lightcone -- a one-off per astro_params combination for
-   calibration, not the per-seed campaign shape.
+   CONFIRMED WORKING on the cluster (first run, 2026-08-25).
+2. CMB optical depth tau_e (p21c.compute_tau), fed by p21c.run_global_
+   evolution -- needs a REAL reionization history spanning z=5.3->20 (wide
+   enough to capture the full x_HI: 0->1 transition), wider than the
+   ~z=6.5-8.3 training window the SBI sightlines actually use. A one-off
+   per astro_params combination for calibration, not the per-seed campaign
+   shape.
+3. The actual spatial lightcone (density + ionization cube), generated
+   separately in section 2b -- not needed for tau_e itself, but this is
+   what can double as the first of the ~40-50 campaign lightcones later.
 
-VERSION: confirmed py21cmfast 4.2 (user-reported) -- this rewrite targets
-the v4 API (InputParameters/AstroOptions/OutputCache), replacing the v3-
-style plain-dict-kwargs version this script started as.
+VERSION: confirmed py21cmfast 4.2. v4 restructured FlagOptions into
+AstroOptions/MatterOptions/SimulationOptions; several of this pipeline's
+OLD flag_options don't exist as-named (USE_MASS_DEPENDENT_ZETA gone
+entirely -- mass-dependent SFR/fesc now appears to be the only supported
+mode, given AstroParams unconditionally carries F_STAR10/F_ESC10/etc.;
+EVOLVING_R_BUBBLE_MAX also gone, no confirmed v4 equivalent found -- left
+at the template default, not guessed, since it's a spatial bubble-
+morphology setting more relevant to later pixel-field structure than to
+this tau_e check specifically). Two flags DO have confirmed v4 equivalents
+(docs quote the physical description, not just a name change) and are
+explicitly overridden in FIDUCIAL_OVERRIDES rather than left at the
+'simple' template's non-matching defaults (RECOMB_MODEL='none',
+PHOTON_CONS_TYPE='no-photoncons', printed by the first run -- did NOT
+match old intent):
+  - RECOMB_MODEL='inhomogeneous' == old INHOMO_RECO=True (same Sobacchi &
+    Mesinger 2014 model, confirmed from the docs' own description).
+  - PHOTON_CONS_TYPE='z-photoncons' == old PHOTON_CONS=True's default
+    behavior (redshift-recalibration correction, Park+22).
+Section 0 below still prints the resolved astro_options/matter_options so
+you can eyeball everything NOT explicitly overridden.
 
-IMPORTANT DESIGN CHOICE, read before running: v4 restructured FlagOptions
-into AstroOptions/MatterOptions/SimulationOptions, and several of the OLD
-flag_options this pipeline used (USE_MASS_DEPENDENT_ZETA, EVOLVING_R_BUBBLE_
-MAX) don't exist in v4 at all; PHOTON_CONS became the string enum
-PHOTON_CONS_TYPE; INHOMO_RECO is deprecated in favor of RECOMB_MODEL. Rather
-than guess a translation (a physics-correctness risk, not just a syntax
-one), this script builds `inputs` from a v4 template ('simple') and ONLY
-overrides the astro_params/cosmo_params/box values that must match the
-existing pipeline -- every flag/option field is left at the template's own
-default. Section 0 below prints those resolved defaults so you can eyeball
-whether they're reasonable for this science case (mass-dependent SFR/fesc
-scaling, inhomogeneous recombinations, photon conservation) before trusting
-the tau_e/UVLF numbers that follow. If any of those defaults look wrong for
-this project, tell me and we'll override them explicitly instead of
-accepting the template.
+CONFIRMED WORKING on the cluster (2026-08-25): HII_DIM/BOX_LEN/N_THREADS as
+SimulationOptions override kwargs, 'simple' template + from_template()
+construction, the whole UV-LF section (two informational, non-fatal
+warnings: USE_MINI_HALOS=False -> ACG-only LFs, matches pre-existing
+intent; USE_TS_FLUCT=False -> brightness_temp inaccurate before Ts
+saturates at high z, but that's brightness_temp not x_HI, so likely fine
+for tau_e/morphology purposes -- not 100% certain there's zero feedback
+onto ionization, flagged rather than dismissed).
 
-CONFIRMED WORKING on the cluster (first real run, 2026-08-25): HII_DIM/
-BOX_LEN/N_THREADS as SimulationOptions override kwargs, the 'simple'
-template + from_template() construction, and the whole UV-LF section (ran
-clean apart from two informational warnings -- USE_MINI_HALOS=False means
-only ACG luminosity functions are computed, which matches this project's
-pre-existing intent; USE_TS_FLUCT=False means the 21-cm brightness-
-temperature signal itself isn't accurate before Ts saturates at high z --
-this affects brightness_temp, not x_HI directly, so it's likely fine for
-tau_e/reionization-morphology purposes, but flagged rather than assumed).
+FIXED across two runs: (a) RectilinearLightconer.between_redshifts() built
+its own default cosmology instead of the custom one from
+FIDUCIAL_OVERRIDES -- fixed with cosmo=inputs.cosmo_params.cosmo. (b) the
+lightconer's `quantities=(...)` used the old v3 field name 'xH_box', which
+doesn't exist in v4 -- crashed with a ValueError that helpfully listed the
+correct name, 'neutral_fraction', among the valid outputs for these
+inputs -- fixed. (c) switched tau_e's data source from run_lightcone's
+lightcone object to run_global_evolution(inputs=inputs) directly -- a
+dedicated function for exactly this (confirmed from the 21cmFAST source,
+py21cmfast/drivers/global_evolution.py: returns a GlobalEvolution object
+with `.quantities['neutral_fraction']` and `.node_redshifts`), and it's
+what run_lightcone was already calling internally anyway (visible in the
+first run's own warning line) -- cleaner than depending on a LightCone
+object's global-quantity attribute name, which was never confirmed.
 
-FIXED after the first run: RectilinearLightconer.between_redshifts() built
-its own default cosmology instead of using the custom one from
-FIDUCIAL_OVERRIDES, raising "lightconer.cosmo is not the same as
-inputs.cosmo_params.cosmo" -- fixed by passing cosmo=inputs.cosmo_params.cosmo
-explicitly.
-
-Still UNVERIFIED: whether run_lightcone(...) returns the final LightCone
-directly from a plain assignment or needs .exhaust_lightcone() -- handled
-defensively below by checking for a `global_xHI` attribute and falling back
-if absent; the z_step_factor=1.05 node-redshift spacing is a first guess,
-not tuned or benchmarked for cost.
+Still UNVERIFIED (section 2b only, since 2a no longer depends on this):
+whether run_lightcone(...) returns the final LightCone directly from a
+plain assignment or needs .exhaust_lightcone() -- handled defensively by
+checking for a `node_redshifts` attribute and falling back if absent; the
+z_step_factor=1.05 node-redshift spacing is a first guess, not tuned or
+benchmarked for cost.
 
 Needs: py21cmfast 4.x on the cluster. Does NOT need the real galaxy catalog
 -- this only checks the astro_params in isolation.
@@ -79,6 +93,25 @@ FIDUCIAL_OVERRIDES = dict(
     OMb=0.04952,
     POWER_INDEX=0.9626,
     SIGMA_8=0.8118,
+    # v4 equivalents of this pipeline's old flag_options (which don't exist
+    # as-named in v4 -- see module docstring). The 'simple' template's own
+    # defaults for these (RECOMB_MODEL='none', PHOTON_CONS_TYPE=
+    # 'no-photoncons', printed by the first cluster run) do NOT match the
+    # old intent (INHOMO_RECO=True, PHOTON_CONS=True), so overriding
+    # explicitly rather than accepting the template here:
+    #   RECOMB_MODEL='inhomogeneous' -- docs: "recombination rate calculated
+    #   locally at every cell (Sobacchi & Mesinger 2014)" -- this IS the old
+    #   INHOMO_RECO=True model, same physics/citation.
+    #   PHOTON_CONS_TYPE='z-photoncons' -- docs: "adjusting the redshift of
+    #   the N_ion source field (Park+22)" -- the classic photon-conservation
+    #   correction, matching old PHOTON_CONS=True's default behavior.
+    # NOT set: old EVOLVING_R_BUBBLE_MAX has no equally clear v4 equivalent
+    # (possibly folded into USE_EXP_FILTER/HII_FILTER, possibly removed) --
+    # left at the template default rather than guessed. It's a spatial
+    # bubble-morphology setting, more relevant to later pixel-field
+    # structure than to this tau_e check -- lower priority to resolve.
+    RECOMB_MODEL='inhomogeneous',
+    PHOTON_CONS_TYPE='z-photoncons',
     # Confirmed valid SimulationOptions override kwargs (HII_DIM via the
     # official 'Qin20' template example; N_THREADS via its own docs entry).
     HII_DIM=256,
@@ -166,35 +199,26 @@ for i, z in enumerate(UVLF_REDSHIFTS):
         print(f"  z={z}: Muv range [{Muv[i][valid].min():.1f}, {Muv[i][valid].max():.1f}], "
               f"phi peak near Muv={Muv[i][valid][i_peak]:.2f}")
 
-# ============================== 2. tau_e (needs a real lightcone) ===========
-cache = p21c.OutputCache(CACHE_DIR)
+# ============================== 2a. tau_e via run_global_evolution =========
+# Dedicated function for exactly this (source: py21cmfast/drivers/
+# global_evolution.py) -- returns a GlobalEvolution object with a
+# `quantities` dict keyed by field name (confirmed 'neutral_fraction' is
+# the correct v4 key, from the crash traceback's own list of valid output
+# names) and a `node_redshifts` property proxying inputs.node_redshifts.
+# No lightconer/cosmology-matching issue here since it only takes `inputs`
+# directly -- cleaner than fighting run_lightcone for something it wasn't
+# the most direct tool for. This is ALSO exactly what run_lightcone calls
+# internally under the hood (visible in the first run's warning line,
+# "global_evolution = run_global_evolution(inputs=inputs)"), so nothing is
+# lost by calling it explicitly instead.
+global_evolution = p21c.run_global_evolution(inputs=inputs, progressbar=True)
 
-lcn = p21c.RectilinearLightconer.between_redshifts(
-    min_redshift=Z_MIN,
-    max_redshift=Z_MAX,
-    quantities=("brightness_temp", "xH_box"),
-    resolution=inputs.simulation_options.cell_size,
-    # Without this, between_redshifts() builds its own default cosmology,
-    # which doesn't match the custom one set via FIDUCIAL_OVERRIDES
-    # (hlittle/OMm/OMb/...) -- caused the "lightconer.cosmo is not the same
-    # as inputs.cosmo_params.cosmo" ValueError on the first run.
-    cosmo=inputs.cosmo_params.cosmo,
-)
-
-lightcone = p21c.run_lightcone(lightconer=lcn, inputs=inputs, cache=cache, progressbar=True)
-if not hasattr(lightcone, "global_xHI"):
-    # run_lightcone is documented as a generator in some usages; a direct
-    # assignment SHOULD already give the final LightCone (per the official
-    # tutorial's own example), but this is a defensive fallback in case it
-    # doesn't in this version -- UNVERIFIED which branch actually fires.
-    lightcone = lightcone.exhaust_lightcone()
-
-z_hist   = np.asarray(lightcone.node_redshifts)
-xHI_hist = np.asarray(lightcone.global_xHI)
+z_hist   = np.asarray(global_evolution.node_redshifts)
+xHI_hist = np.asarray(global_evolution.quantities['neutral_fraction'])
 
 i_lo, i_hi = np.argmin(z_hist), np.argmax(z_hist)
-print(f"\n[lightcone] x_HI(z={z_hist[i_lo]:.2f}) = {xHI_hist[i_lo]:.4f}  (should be ~0, fully ionized)")
-print(f"[lightcone] x_HI(z={z_hist[i_hi]:.2f}) = {xHI_hist[i_hi]:.4f}  (should be ~1 -- "
+print(f"\n[global_evolution] x_HI(z={z_hist[i_lo]:.2f}) = {xHI_hist[i_lo]:.4f}  (should be ~0, fully ionized)")
+print(f"[global_evolution] x_HI(z={z_hist[i_hi]:.2f}) = {xHI_hist[i_hi]:.4f}  (should be ~1 -- "
       f"if well below 1, raise Z_MAX and rerun; tau_e would otherwise be biased LOW, "
       f"missing the high-z neutral-IGM contribution)")
 
@@ -211,12 +235,46 @@ np.savez(tau_out, z_hist=z_hist, xHI_hist=xHI_hist,
          tau_e=tau_e, astro_overrides=FIDUCIAL_OVERRIDES)
 print(f"[tau_e] saved {tau_out}")
 
-# This lightcone's 5.3-20 span covers the ~6.5-8.3 SBI training window
-# (z_end..z_hi) within it -- it can double as the first of the ~40-50
-# campaign lightcones once lyabubbles/lightcone_field.py + sbi_pixel_field.py
-# are updated to draw from a per-seed lightcone list instead of the current
+# ============================== 2b. the actual spatial lightcone ===========
+# run_global_evolution above is enough for tau_e alone -- this section
+# generates the real 3D lightcone (density + ionization structure), which
+# is the part that can double as the first of the ~40-50 campaign
+# lightcones once lyabubbles/lightcone_field.py + sbi_pixel_field.py are
+# updated to draw from a per-seed lightcone list instead of the current
 # single 13-snapshot table (not done yet, see cluster-storage-expansion
-# memory's "next concrete step"). One seed's tau_e is a reasonable starting
-# point for F_ESC10 calibration -- seed-to-seed tau_e scatter at this box
-# size should be modest but isn't exactly zero; average across 2-3 seeds
-# instead if the calibration needs to be tighter than that.
+# memory's "next concrete step"). Comment this section out if you only
+# wanted the tau_e/UVLF check for now and don't need the cached cube yet --
+# it's the most expensive part of the script.
+cache = p21c.OutputCache(CACHE_DIR)
+
+lcn = p21c.RectilinearLightconer.between_redshifts(
+    min_redshift=Z_MIN,
+    max_redshift=Z_MAX,
+    # 'xH_box' (old v3 name) doesn't exist in v4 -- confirmed correct name
+    # 'neutral_fraction' from the crash traceback's own list of valid
+    # output arrays for these inputs.
+    quantities=("brightness_temp", "neutral_fraction"),
+    resolution=inputs.simulation_options.cell_size,
+    # Without this, between_redshifts() builds its own default cosmology,
+    # which doesn't match the custom one set via FIDUCIAL_OVERRIDES
+    # (hlittle/OMm/OMb/...) -- caused the "lightconer.cosmo is not the same
+    # as inputs.cosmo_params.cosmo" ValueError on the first run.
+    cosmo=inputs.cosmo_params.cosmo,
+)
+
+lightcone = p21c.run_lightcone(lightconer=lcn, inputs=inputs, cache=cache, progressbar=True)
+if not hasattr(lightcone, "node_redshifts"):
+    # run_lightcone is documented as a generator in some usages; a direct
+    # assignment SHOULD already give the final LightCone (per the official
+    # tutorial's own example), but this is a defensive fallback in case it
+    # doesn't in this version -- UNVERIFIED which branch actually fires.
+    lightcone = lightcone.exhaust_lightcone()
+
+print(f"\n[lightcone] generated and cached in {CACHE_DIR} -- "
+      f"{len(lightcone.node_redshifts)} node redshifts, "
+      f"quantities={('brightness_temp', 'neutral_fraction')}")
+
+# One seed's tau_e (from 2a above) is a reasonable starting point for
+# F_ESC10 calibration -- seed-to-seed tau_e scatter at this box size should
+# be modest but isn't exactly zero; average across 2-3 seeds instead if the
+# calibration needs to be tighter than that.
