@@ -229,6 +229,14 @@ global_evolution = p21c.run_global_evolution(inputs=inputs, progressbar=True)
 
 z_hist   = np.asarray(global_evolution.node_redshifts)
 xHI_hist = np.asarray(global_evolution.quantities['neutral_fraction'])
+# node_redshifts comes out in the simulation's natural order (descending,
+# high-z-first -- it's computed forward in cosmic time from high z to low
+# z), but compute_tau requires ascending order ("redshifts and global_xHI
+# must be in ascending order" ValueError otherwise). Sort once here so
+# everything downstream (prints, compute_tau, the saved .npz) is
+# consistently ordered.
+_order = np.argsort(z_hist)
+z_hist, xHI_hist = z_hist[_order], xHI_hist[_order]
 
 i_lo, i_hi = np.argmin(z_hist), np.argmax(z_hist)
 print(f"\n[global_evolution] x_HI(z={z_hist[i_lo]:.2f}) = {xHI_hist[i_lo]:.4f}  (should be ~0, fully ionized)")
