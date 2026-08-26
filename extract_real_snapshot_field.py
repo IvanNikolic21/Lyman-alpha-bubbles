@@ -38,6 +38,7 @@ path = _PATH_TEMPLATE.format(z=f"{Z:.4f}")
 print(f"[open] {path}")
 
 CANDIDATE_KEYS = [
+    "IonizedBox/OutputFields/neutral_fraction",   # confirmed 2026-08-26 against a real cached snapshot
     "xH_box", "neutral_fraction", "x_HI", "xHI",
     "OutputFields/xH_box", "OutputFields/neutral_fraction",
 ]
