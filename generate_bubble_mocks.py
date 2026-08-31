@@ -141,6 +141,23 @@ def generate_split(n_sim, batch_size, seed, output_dir, prefix, geom, k_grid, me
     while n_done < n_sim:
         this_batch = min(batch_size, n_sim - n_done)
         out_path = os.path.join(output_dir, f"{prefix}_batch_{batch_idx:05d}.npz")
+
+        # ALWAYS draw this batch's random numbers from rng_master, whether or
+        # not the batch is actually computed below -- real bug found/fixed
+        # here: the previous version only drew when a batch was missing, so
+        # on a resumed/extended run (e.g. raising --n_sim in the same
+        # --output_dir) every skipped batch left rng_master un-advanced, and
+        # the first genuinely NEW batch silently replayed the exact same
+        # draws (hence the exact same x_ion/k_factor/masks) as batch 0
+        # already on disk. Drawing unconditionally keeps rng_master's stream
+        # identical to what a single from-scratch run at the larger --n_sim
+        # would have produced, so resuming/extending is actually equivalent
+        # to a longer uninterrupted run, not a source of duplicate mocks.
+        x_ion_batch = rng_master.uniform(*ionized_frac_range, size=this_batch)
+        k_factor_batch = np.exp(rng_master.uniform(np.log(k_factor_range[0]), np.log(k_factor_range[1]),
+                                                    size=this_batch))
+        mock_seeds = rng_master.integers(0, 2**31 - 1, size=this_batch)
+
         if os.path.exists(out_path):
             existing_n = len(np.load(out_path)["x_ion"])
             if existing_n != this_batch:
@@ -155,15 +172,12 @@ def generate_split(n_sim, batch_size, seed, output_dir, prefix, geom, k_grid, me
             batch_idx += 1
             continue
 
-        x_ion_batch = rng_master.uniform(*ionized_frac_range, size=this_batch)
-        k_factor_batch = np.exp(rng_master.uniform(np.log(k_factor_range[0]), np.log(k_factor_range[1]),
-                                                    size=this_batch))
         K_batch = K_FIT * k_factor_batch
 
         masks = np.zeros((this_batch, n_gal, n_los), dtype=np.uint8)
         n_bubbles = np.zeros(this_batch, dtype=np.int64)
         for j in range(this_batch):
-            mrng = np.random.default_rng(rng_master.integers(0, 2**31 - 1))
+            mrng = np.random.default_rng(mock_seeds[j])
             masks[j], n_bubbles[j] = generate_one_mock(
                 mrng, x_ion_batch[j], K_batch[j], geom, k_grid, mean_vol_grid,
                 x_gal, y_gal, z_gal, z_end_offset, n_gal, n_los)
