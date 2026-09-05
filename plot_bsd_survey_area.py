@@ -36,6 +36,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch, Rectangle
 from scipy.ndimage import distance_transform_edt
+from scipy.stats import gaussian_kde
 
 REPO = "/Users/dxf836/Documents/git_code/Lyman-alpha-bubbles"
 
@@ -46,19 +47,20 @@ REPO = "/Users/dxf836/Documents/git_code/Lyman-alpha-bubbles"
 # of silently loading the wrong field for a given result set.
 Z_SNAPSHOT = 7.2436
 RESULTS_PATH = f"{REPO}/bsd_survey_area_results_z{Z_SNAPSHOT:.4f}.npz"
-OUT_PATH = f"{REPO}/bsd_survey_area_proposal_plot_z{Z_SNAPSHOT:.4f}.png"
+OUT_PATH = f"{REPO}/bsd_survey_area_proposal_plot_z{Z_SNAPSHOT:.4f}.pdf"
 
-INK_PRIMARY, INK_SECOND, INK_MUTED = "#0b0b0b", "#52514e", "#898781"
-SURFACE, GRID = "#fcfcfb", "#e1e0d9"
-C_ION, C_NEU = "#1baf7a", "#383835"
+INK_PRIMARY, INK_SECOND, INK_MUTED = "black", "black", "black"
+SURFACE, GRID = "white", "#e1e0d9"
+C_ION, C_NEU = "white", "black"
 C_CURRENT, C_PROPOSED, C_TRUTH = "#eb6834", "#2a78d6", "#0b0b0b"
+C_210 = "purple"   # distinct from C_ION (green, already used for the field fill)
 cmap_bin = matplotlib.colors.ListedColormap([C_NEU, C_ION])
 
 
 def load_results():
     d = np.load(RESULTS_PATH, allow_pickle=True)
     cases = {}
-    for label in ["full_box", "current", "proposed"]:
+    for label in ["full_box", "current", "proposed", "proposed_210"]:
         cases[label] = dict(
             dist=d[f"{label}__dist"], status=d[f"{label}__status"],
             side_mpc=float(d[f"{label}__side_mpc"]), n_tiles=int(d[f"{label}__n_tiles"]),
@@ -91,10 +93,27 @@ def find_largest_bubble_center(ionized, margin_cells=40, safe_border_cells=0):
     bubble-radius prior ceiling) before running the transform, then reading
     back only the interior (un-padded) region -- this gives the same answer
     a fully periodic transform would, for any true bubble smaller than the
-    margin."""
+    margin.
+
+    `safe_border_cells`: keep the chosen (i, j) away from the transverse
+    array edges, so a later plain (non-periodic) crop centered on this
+    point doesn't silently show only one side of a periodic-wrapped
+    structure. Real bug caught before trusting the z=7.2436 run: this
+    parameter existed and was documented but the masking code itself was
+    never actually written into this function body (dropped in an earlier
+    edit) -- it silently did nothing, and the z=6.5 run's chosen center
+    happened not to be near an edge so nothing looked wrong. z=7.2436's
+    actual largest bubble IS near an edge (j=2), which is what exposed it."""
     padded = np.pad(ionized, margin_cells, mode="wrap")
     edt_padded = distance_transform_edt(padded)
     edt = edt_padded[margin_cells:-margin_cells, margin_cells:-margin_cells, margin_cells:-margin_cells]
+    if safe_border_cells > 0:
+        border = np.ones_like(edt, dtype=bool)
+        border[:safe_border_cells, :, :] = False
+        border[-safe_border_cells:, :, :] = False
+        border[:, :safe_border_cells, :] = False
+        border[:, -safe_border_cells:, :] = False
+        edt = np.where(border, edt, -1.0)
     ci, cj, ck = np.unravel_index(np.argmax(edt), edt.shape)
     return int(ci), int(cj), int(ck), float(edt[ci, cj, ck])
 
@@ -144,23 +163,38 @@ def render_context_panel(ax, ionized, cell_size, n_cell, center_ijk, context_sid
         spine.set_color(INK_MUTED)
 
 
-def bsd_curve(dist, n_bins=22):
-    """d P / d(ln R): histogram in log-R, density-normalized -- the
-    standard Mesinger & Furlanetto 2007 bubble-size-distribution
-    convention, comparable in shape regardless of each case's ray count.
+SMOOTHING_MULT = 2.2   # multiplies Scott's-rule bandwidth -- see bsd_curve
 
-    n_bins deliberately modest: `dist` is quantized to multiples of the
-    compute script's step size (0.75 Mpc, confirmed: only 150-350 distinct
-    values across 200,000 rays per case), so a finer log-binning (an
-    earlier 40-bin version) produces a jagged sawtooth purely from bins
-    landing between quantization levels, not real distributional
-    structure -- misleading in a proposal figure. 22 bins keeps bin width
-    comfortably above the quantization step across nearly the whole range."""
+
+def bsd_curve(dist, n_grid=200, smoothing_mult=SMOOTHING_MULT):
+    """d P / d(ln R): Gaussian KDE in log-R space, evaluated on a fixed grid
+    -- the standard Mesinger & Furlanetto 2007 bubble-size-distribution
+    convention (dP/dlnR), but as a smooth density estimate rather than a
+    fixed-bin histogram.
+
+    Switched from a 22-bin histogram (itself already a fix for an earlier
+    40-bin version) after the underlying cause was diagnosed properly: each
+    ray's recorded R is quantized to multiples of the compute script's step
+    size, so a histogram bins a fundamentally discrete/lumpy set of values
+    and any fixed bin edges will straddle quantization levels inconsistently
+    -- visible as a sawtooth that isn't real distributional structure. KDE
+    doesn't eliminate that discreteness, but convolving each sample with a
+    smooth kernel is far less sensitive to exactly where bin edges happen to
+    fall. The compute script ALSO now uses a ~3.3x finer step size for the
+    same reason (shrinks the underlying quantization itself, cheap to do) --
+    this and the KDE switch are a belt-and-suspenders fix, not either/or.
+
+    `smoothing_mult` scales scipy's default Scott's-rule bandwidth up (per
+    request, z=7.2436 still had visible small-scale wiggle at the default
+    factor) -- 2.2x was chosen by inspection (smooths the sub-Mpc-scale
+    wiggle without visibly flattening the broader current/proposed/full_box
+    separation that's the actual evidence); tune here if it needs to move."""
     dist = dist[dist > 0]
     log_r = np.log(dist)
-    counts, edges = np.histogram(log_r, bins=n_bins, density=True)
-    centers_log = 0.5 * (edges[:-1] + edges[1:])
-    return np.exp(centers_log), counts
+    kde = gaussian_kde(log_r)
+    kde.set_bandwidth(kde.factor * smoothing_mult)
+    grid = np.linspace(log_r.min(), log_r.max(), n_grid)
+    return np.exp(grid), kde(grid)
 
 
 def main():
@@ -180,30 +214,33 @@ def main():
     print(f"[context center] largest-bubble cell ({ci},{cj},{ck}), inscribed radius "
           f"~{edt_r_cells * cell_size:.1f} Mpc", flush=True)
 
-    fig = plt.figure(figsize=(11.5, 12.5))
+    fig = plt.figure(figsize=(18, 8))
     fig.patch.set_facecolor(SURFACE)
-    gs = fig.add_gridspec(2, 1, height_ratios=[1.15, 1], hspace=0.3)
+    gs = fig.add_gridspec(1, 2, width_ratios=[1, 1], wspace=0.3)
 
     ax_a = fig.add_subplot(gs[0])
     footprints = [
         ("current (70 arcmin$^2$)", cases["current"]["side_mpc"], C_CURRENT),
         ("proposed (140 arcmin$^2$)", cases["proposed"]["side_mpc"], C_PROPOSED),
+        ("210 arcmin$^2$", cases["proposed_210"]["side_mpc"], C_210),
     ]
     render_context_panel(ax_a, ionized, cell_size, n_cell, (ci, cj, ck), context_side_mpc,
                         footprints)
 
     fig.legend(handles=[Patch(facecolor=C_ION, label="ionized"), Patch(facecolor=C_NEU, label="neutral"),
                         Patch(facecolor="none", edgecolor=C_CURRENT, linewidth=2.2, label="current footprint"),
-                        Patch(facecolor="none", edgecolor=C_PROPOSED, linewidth=2.2, label="proposed footprint")],
-               loc="upper center", ncol=4, frameon=False, fontsize=9, bbox_to_anchor=(0.5, 0.985),
+                        Patch(facecolor="none", edgecolor=C_PROPOSED, linewidth=2.2, label="proposed footprint"),
+                        Patch(facecolor="none", edgecolor=C_210, linewidth=2.2, label="210 arcmin$^2$ footprint")],
+               loc="upper center", ncol=5, frameon=False, fontsize=8.5, bbox_to_anchor=(0.5, 0.985),
                labelcolor=INK_SECOND)
 
     ax_c = fig.add_subplot(gs[1])
     ax_c.set_facecolor(SURFACE)
     style = {"full_box": (C_TRUTH, "-", 2.4, "full box (reference)"),
             "current": (C_CURRENT, "-", 2.2, "current area (70 arcmin$^2$)"),
-            "proposed": (C_PROPOSED, "-", 2.2, "proposed area (140 arcmin$^2$)")}
-    for label in ["full_box", "current", "proposed"]:
+            "proposed": (C_PROPOSED, "-", 2.2, "proposed area (140 arcmin$^2$)"),
+            "proposed_210": (C_210, "-", 2.2, "210 arcmin$^2$")}
+    for label in ["full_box", "current", "proposed", "proposed_210"]:
         r, dpdlnr = bsd_curve(cases[label]["dist"])
         color, ls, lw, leg = style[label]
         ax_c.plot(r, dpdlnr, color=color, ls=ls, lw=lw, label=leg)
@@ -211,25 +248,26 @@ def main():
         ax_c.axvline(mean_r, color=color, lw=1, ls=":", alpha=0.7)
 
     ax_c.set_xscale("log")
-    ax_c.set_xlabel("bubble size R [comoving Mpc]", color=INK_SECOND, fontsize=10.5)
-    ax_c.set_ylabel(r"$dP/d\ln R$", color=INK_SECOND, fontsize=10.5)
-    ax_c.set_title("Mean-free-path bubble size distribution", color=INK_PRIMARY, fontsize=12, loc="left")
-    ax_c.legend(frameon=False, fontsize=9.5, labelcolor=INK_SECOND, loc="upper right")
+    ax_c.set_xlabel("bubble size R [comoving Mpc]", color=INK_SECOND, fontsize=14)
+    ax_c.set_ylabel(r"$dP/d\ln R$", color=INK_SECOND, fontsize=14)
+    ax_c.set_title("Mean-free-path bubble size distribution", color=INK_PRIMARY, fontsize=18, loc="left")
+    ax_c.legend(frameon=False, fontsize=12, labelcolor=INK_SECOND, loc="upper right")
     ax_c.grid(True, color=GRID, linewidth=0.8)
-    ax_c.tick_params(colors=INK_MUTED, labelsize=9)
+    ax_c.tick_params(colors=INK_MUTED, labelsize=14)
 
     frac_capped_cur = (cases["current"]["status"] == "capped_by_area").mean()
     frac_capped_pro = (cases["proposed"]["status"] == "capped_by_area").mean()
+    frac_capped_210 = (cases["proposed_210"]["status"] == "capped_by_area").mean()
     note = (f"{frac_capped_cur*100:.0f}% of current-area measurements never reach a true bubble "
            f"edge -- capped by the survey boundary\n"
-           f"{frac_capped_pro*100:.0f}% still capped at the proposed area, vs. 0% for the "
-           f"unrestricted reference")
+           f"{frac_capped_pro*100:.0f}% still capped at 140 arcmin$^2$, {frac_capped_210*100:.0f}% "
+           f"still capped at 210 arcmin$^2$, vs. 0% for the unrestricted reference")
     ax_c.text(0.02, 0.03, note, transform=ax_c.transAxes, fontsize=8.7, color=INK_SECOND,
              va="bottom", ha="left")
 
     fig.suptitle("Small survey areas bias the inferred bubble size distribution low",
-                 color=INK_PRIMARY, fontsize=15, fontweight="bold", x=0.02, ha="left", y=0.995)
-    fig.savefig(OUT_PATH, dpi=170, facecolor=SURFACE, bbox_inches="tight")
+                 color=INK_PRIMARY, fontsize=18, fontweight="bold", x=0.02, ha="left", y=0.995)
+    fig.savefig(OUT_PATH, facecolor='white', bbox_inches="tight")
     print(f"[saved] {OUT_PATH}", flush=True)
 
 

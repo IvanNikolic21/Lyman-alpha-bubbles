@@ -363,7 +363,12 @@ def run_train_nre(args):
         torch.as_tensor(theta_train, dtype=torch.float32, device=args.device),
         torch.as_tensor(x_train, dtype=torch.float32, device=args.device),
     )
-    ratio_estimator = inference.train()
+    train_kwargs = {}
+    if args.max_num_epochs is not None:
+        train_kwargs['max_num_epochs'] = args.max_num_epochs
+        print(f"[train_nre] max_num_epochs={args.max_num_epochs} (hard cap, sbi's own "
+              f"early stopping may still end training sooner)", flush=True)
+    ratio_estimator = inference.train(**train_kwargs)
 
     os.makedirs(args.output_dir, exist_ok=True)
     out_path = os.path.join(args.output_dir, 'ratio_estimator.pt')
@@ -498,6 +503,15 @@ if __name__ == '__main__':
                               "grid structure (best-effort, falls back to sbi's default "
                               "classifier if the API call fails). 'none': sbi's default flat "
                               "classifier.")
+    p_train.add_argument('--max_num_epochs', type=int, default=None,
+                         help="Hard cap passed to sbi's inference.train(). Added after a real "
+                              "cluster run hit its SLURM --time limit mid-training and lost all "
+                              "progress -- inference.train() has NO checkpointing, it only "
+                              "returns (and this script only saves) once training finishes on "
+                              "its own via sbi's default early-stopping patience, which is "
+                              "unbounded in wall-clock terms. Setting this gives a predictable "
+                              "ceiling; sbi's own early stopping can still end training sooner. "
+                              "Leave unset for sbi's default (no cap).")
     p_train.add_argument('--output_dir', type=str, required=True)
 
     p_infer = sub.add_parser('infer', help='Pool-based inference at the real x_obs: marginal '

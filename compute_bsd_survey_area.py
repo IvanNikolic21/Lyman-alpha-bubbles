@@ -72,6 +72,9 @@ Z_SNAPSHOT = 7.2436               # closest cached entry to the requested "z~7.3
                                   # (x_H=0.4738, i.e. ~53% ionized -- see
                                   # lyabubbles/lightcone_field.py's _RAW_SNAPSHOTS
                                   # for the other 12 available timesteps)
+                                  # -- z=6.5 results/plots from earlier stay on
+                                  # disk untouched; this script now only targets
+                                  # z=7.2436 per instruction to focus on it.
 FIELD_PATH = f"/Users/dxf836/Downloads/real_snapshot_z{Z_SNAPSHOT:.4f}_field.npy"
 OUT_PATH = f"{REPO}/bsd_survey_area_results_z{Z_SNAPSHOT:.4f}.npz"
 
@@ -79,11 +82,21 @@ BOX_LEN_MPC = 384.0
 THRESHOLD = 0.5                  # neutral_frac >= THRESHOLD -> neutral; matches
                                   # compare_real_vs_mock.py's established convention
 
-AREA_ARCMIN2 = {"current": 70.0, "proposed": 140.0}   # your real proposal numbers
+# your real proposal numbers -- 210 added as a third point (3x current) to
+# see how much of the gap to the full-box reference a further increase
+# closes, since 140 alone only closed part of it.
+AREA_ARCMIN2 = {"current": 70.0, "proposed": 140.0, "proposed_210": 210.0}
 
 N_RAYS_TOTAL = 200_000            # per case
-STEP_FRAC_OF_CELL = 0.5            # sub-cell stepping for reasonable resolution
-MAX_STEPS = 400                    # cap = 400*step_size Mpc; see docstring
+# STEP_FRAC_OF_CELL=0.5 (0.75 Mpc steps) quantizes each ray's recorded R to
+# one of only ~150-350 distinct values across 200,000 rays -- visibly jagged
+# once histogrammed (bins straddle inconsistent numbers of quantization
+# levels). 0.15 (0.225 Mpc) gives ~3.3x finer resolution; MAX_STEPS scaled
+# up to match so the physical distance cap (MAX_STEPS*step_size) is
+# unchanged. Runtime is still well under a minute even so (was ~1s/case at
+# the coarser step).
+STEP_FRAC_OF_CELL = 0.15
+MAX_STEPS = 1333
 SEED = 0
 
 
