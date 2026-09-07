@@ -334,8 +334,14 @@ def run_train_nre(args):
     # sbi's SNRE_B constructor validates against this more strictly than
     # expected once actually run.
     from sbi.utils import BoxUniform
-    prior = BoxUniform(low=torch.zeros(theta_train.shape[1]),
-                       high=torch.ones(theta_train.shape[1]))
+    # Real bug caught from a cluster run: torch.zeros/ones default to CPU,
+    # but sbi's SNRE_B (this sbi version) asserts the prior's device matches
+    # the training device -- fine on --device cpu (both default to CPU),
+    # but --device cuda raised "Prior device 'cpu' must match training
+    # device 'cuda:0'" immediately at construction. Explicit device= fixes
+    # both cases uniformly.
+    prior = BoxUniform(low=torch.zeros(theta_train.shape[1], device=args.device),
+                       high=torch.ones(theta_train.shape[1], device=args.device))
 
     # Custom CNN embedding for theta (exploits its (n_gal, n_los) grid
     # structure, see sbi_pixel_nn.py) -- best-effort: sbi's exact
