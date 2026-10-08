@@ -23,6 +23,15 @@ any real miscalibration. So statistics are split into two groups and reported se
   pair_agree agreement of near-source states for close galaxy pairs (cross-sightline structure)
   TARP       coverage test on the near-source block (first N_NEAR bins of every sightline) only
 
+ Depth sweep ("how far from the galaxies can we trust / learn anything?"):
+  tarp_cum   TARP on the block of the first N bins of every sightline, for N in N_SWEEP
+  tarp_shell TARP on the shell of bins between consecutive N_SWEEP entries (isolates each distance)
+  per-bin    ranks / posterior std of the across-galaxy neutral fraction in each bin k, and the
+             importance-weighted posterior P(neutral) map of every query (post_p) with its truth
+             (true_grid) -> per-bin Brier skill vs the prior, computed in plot_pixel_sbc_depth.py.
+  Calibration alone does NOT mean "precise": a prior-like posterior passes TARP too. Precision at a
+  given distance = calibrated AND informative (posterior std < prior std, Brier skill > 0).
+
  Prior-structure (tests the simulator's coupling, NOT Lya information):
   glob, slab_0..3   global / per-slab neutral fractions (slab 1-3 lie far from the galaxies)
 
@@ -58,6 +67,7 @@ import sbi_pixel_field as spf   # load_sims(), _add_catalog_args()
 
 N_NEAR = 5
 SLAB_EDGES = (0, 19, 38, 57, 75)
+N_SWEEP = (1, 2, 3, 5, 8, 12, 19, 28, 38, 57, 75)   # cumulative TARP blocks; shells between entries
 R_V_CMPC = 2.0      # ~200 km/s Lya velocity offset at z~7 in comoving distance (softens 1/r^2 at r -> 0)
 
 
@@ -133,7 +143,8 @@ def main():
     z_end = 5.3                                                           # = lightcone_field Z_END_DEFAULT
     d_gal = _cosmo.comoving_distance(np.asarray(s.redshifts)).to(_u.Mpc).value
     d_end = _cosmo.comoving_distance(z_end).to(_u.Mpc).value
-    W = dw_weights((d_gal - d_end) / n_los, n_los)
+    bin_width = (d_gal - d_end) / n_los
+    W = dw_weights(bin_width, n_los)
     print(f"[sbc] damping-wing weights: first {N_NEAR} bins carry "
           f"{W[:, :N_NEAR].sum(axis=1).mean():.1%} of the weight (mean over galaxies).", flush=True)
     dx = s.x_gal[:, None] - s.x_gal[None, :]; dy = s.y_gal[:, None] - s.y_gal[None, :]
@@ -155,6 +166,9 @@ def main():
     pool_stats = statistics(pool_grid, pairs, W)                                # (n_pool, n_stat)
     pool_dw = dw_per_galaxy(pool_grid, W)                                       # (n_pool, n_gal)
     pool_near_block = pool_grid[:, :, :N_NEAR].reshape(len(pool_grid), -1)      # TARP on informed block
+    pool_col = pool_grid.mean(axis=1)                                           # (n_pool, n_los) per-bin fraction
+    pool_flat = theta_pool.reshape(len(theta_pool), -1)
+    n_cut = np.array(N_SWEEP)
     theta_pool_t = torch.as_tensor(theta_pool, dtype=torch.float32, device=args.device)
     print(f"[sbc] {n_queries} queries vs a disjoint {len(pool_idx)}-instance pool; "
           f"{args.n_post} SIR samples each; statistics: {STAT_NAMES}", flush=True)
@@ -165,6 +179,10 @@ def main():
     post_std = np.empty((n_queries, n_stat)); ess = np.empty(n_queries)
     tarp_f = np.empty(n_queries)
     ranks_dw = np.empty((n_queries, n_gal))     # per-galaxy damping-wing statistic ranks
+    tarp_cum = np.empty((n_queries, len(N_SWEEP))); tarp_shell = np.empty((n_queries, len(N_SWEEP)))
+    ranks_bin = np.empty((n_queries, n_los)); post_std_bin = np.empty((n_queries, n_los))
+    post_p = np.empty((n_queries, n_gal, n_los), np.float32)    # importance-weighted P(neutral) maps
+    true_grid = np.empty((n_queries, n_gal, n_los), np.uint8)
 
     t0 = time.perf_counter()
     with torch.no_grad():
@@ -195,6 +213,25 @@ def main():
             d_true = np.sqrt(((t_grid[0, :, :N_NEAR].ravel() - ref) ** 2).sum())
             tarp_f[qi] = np.mean(d_post < d_true)
 
+            # depth sweep: one reference map per query, squared distances accumulated bin by bin
+            ref_g = pool_grid[rng.integers(len(pool_grid))]
+            sq_post = np.cumsum(((pool_grid[pick] - ref_g) ** 2).sum(axis=1), axis=1)   # (n_post, n_los)
+            sq_true = np.cumsum(((t_grid[0] - ref_g) ** 2).sum(axis=0))                # (n_los,)
+            c_post, c_true = sq_post[:, n_cut - 1], sq_true[n_cut - 1]
+            prev = np.concatenate([[0], n_cut[:-1]]) - 1
+            s_post = c_post - np.where(prev >= 0, sq_post[:, np.maximum(prev, 0)], 0)
+            s_true = c_true - np.where(prev >= 0, sq_true[np.maximum(prev, 0)], 0)
+            # ties (identical distances, common for binary maps) broken at random
+            tarp_cum[qi] = ((c_post < c_true).sum(0) + rng.random(len(n_cut)) * ((c_post == c_true).sum(0))) / args.n_post
+            tarp_shell[qi] = ((s_post < s_true).sum(0) + rng.random(len(n_cut)) * ((s_post == s_true).sum(0))) / args.n_post
+
+            col_true = t_grid[0].mean(axis=0); col_post = pool_col[pick]
+            less = (col_post < col_true).sum(axis=0); equal = (col_post == col_true).sum(axis=0)
+            ranks_bin[qi] = (less + rng.random(n_los) * (equal + 1)) / (args.n_post + 1)
+            post_std_bin[qi] = col_post.std(0)
+            post_p[qi] = (w @ pool_flat).reshape(n_gal, n_los)
+            true_grid[qi] = t_grid[0]
+
             if (qi + 1) % max(1, n_queries // 20) == 0:
                 el = time.perf_counter() - t0
                 print(f"[sbc] {qi + 1}/{n_queries} ({(qi + 1) / el:.2f}/s, "
@@ -205,7 +242,10 @@ def main():
     np.savez(out, ranks=ranks, true_stats=true_stats, post_mean=post_mean, post_std=post_std,
              ess=ess, tarp_f=tarp_f, stat_names=np.array(STAT_NAMES), n_post=args.n_post,
              stat_groups=np.array([STAT_GROUP[n] for n in STAT_NAMES]), ranks_dw=ranks_dw, dw_weights=W,
-             n_queries=n_queries, n_pool=len(pool_idx), n_pairs=len(pairs), query_idx=query_idx)
+             n_queries=n_queries, n_pool=len(pool_idx), n_pairs=len(pairs), query_idx=query_idx,
+             n_sweep=n_cut, tarp_cum=tarp_cum, tarp_shell=tarp_shell, ranks_bin=ranks_bin,
+             post_std_bin=post_std_bin, prior_std_bin=pool_col.std(0), prior_p_bin=pool_grid.mean(axis=(0, 1)),
+             post_p=post_p, true_grid=true_grid, bin_width=bin_width)
 
     # quick text summary: coverage of central 68% / 95% intervals per statistic
     print(f"[sbc] median ESS {np.median(ess):.0f}")
