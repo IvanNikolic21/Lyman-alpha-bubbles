@@ -112,6 +112,12 @@ def _compute_tau_and_x_for_batch(masks, meta, z_b_edges, z_e_edges, n_los,
         numerator = np.trapz(weighted, wave_em_vals, axis=1)
         t_in = numerator / rdr._S.j_s_trapz_denom[:, k]
         ew_pred = rdr._S.ew_int[:, k] * t_in
+        if not np.all(np.isfinite(ew_pred)):
+            # a nan EW silently becomes a 3-sigma upper limit in _build_x -> constant x, and the
+            # NRE then learns nothing (happened with the Tang EW models before the p_Tang W=0 fix)
+            raise FloatingPointError(
+                f"non-finite predicted EW for galaxies {np.where(~np.isfinite(ew_pred))[0].tolist()} "
+                f"(ew_model={ew_model}); check the intrinsic EW sampler.")
         x_out[k] = _build_x(ew_pred, sigma, rng)
 
     theta_out = theta_batch.transpose(1, 0, 2).reshape(this_batch, n_gal * n_los)

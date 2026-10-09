@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 
 path = sys.argv[1] if len(sys.argv) > 1 else 'pixel_sbc.npz'
 real_path = sys.argv[2] if len(sys.argv) > 2 else None
-U_MIN = 0.05                # uncertainty coefficient below this = "no better than the prior"
+U_MIN = 0.05                # uncertainty coefficient this far above the far-field floor = "local information"
 EPS = 1e-4
 d = np.load(path)
 need = ('tarp_cum', 'tarp_shell', 'post_p', 'true_grid', 'prior_p_bin')
@@ -98,12 +98,19 @@ a0.plot(r_bin, U_exp, color=C1, lw=2.2, label='expected (log-loss vs truth)')
 a0.plot(r_bin, U_exp_ent, color=C1, lw=1.2, ls='--', label='expected (posterior entropy)')
 if U_real is not None:
     a0.plot(r_bin, U_real, color=C2, lw=2.2, label='realised, GOODS-N (posterior entropy)')
-a0.axhline(U_MIN, color=INK, lw=0.6, ls=':')
-inf = U_exp >= U_MIN
+# Far-field floor: information that does not decay with distance comes from the prior coupling
+# (e.g. one global ionized fraction per lightcone), not from Lya reaching that far. Local reach is
+# measured ABOVE this floor (median over the farthest third of the bins).
+floor = np.median(U_exp[2 * n_los // 3:])
+a0.axhline(floor, color=C1, lw=0.8, ls='-.')
+a0.text(r_bin[-1], floor - 0.01, 'far-field floor\n(global ionization level)', color=C1, fontsize=8.5,
+        ha='right', va='top')
+inf = U_exp - floor >= U_MIN
 r_inf = r_bin[np.argmin(inf)] if not inf.all() else r_bin[-1]
 if inf[0]:
     a0.axvspan(0, r_inf, color=C1, alpha=0.06, lw=0)
-    a0.text(r_inf, U_MIN + 0.03, f' informative to ~{r_inf:.0f} cMpc', color=C1, fontsize=9, va='bottom')
+    a0.text(r_inf, floor + U_MIN + 0.03, f' local information to ~{r_inf:.0f} cMpc', color=C1, fontsize=9,
+            va='bottom')
 a0.set_ylabel('fraction of prior uncertainty\nremoved per pixel  $I/H$')
 a0.set_title('What Lya constrains along the sightline', fontsize=11)
 a0.legend(frameon=False, fontsize=9, loc='upper right')
@@ -142,5 +149,6 @@ for j, N in enumerate(n_cut):
     print(f"{lo:3d}-{N - 1:<3d} {r_cut[j]:8.1f} {U_exp[sl].mean():6.3f} {U_exp_ent[sl].mean():6.3f} {ur} "
           f"{np.nanmean(AUC[sl]):5.2f} {contr_exp[sl].mean():6.2f} {cov68[sl].mean():6.2f} "
           f"{dev_shell[j]:6.3f}{'*' if dev_shell[j] > band_k else ' '}")
-print(f"U_exp >= {U_MIN} out to ~{r_inf:.0f} cMpc  (* = TARP shell outside family-wise band)")
+print(f"far-field floor U = {floor:.3f}; U_exp - floor >= {U_MIN} out to ~{r_inf:.0f} cMpc  "
+      f"(* = TARP shell outside family-wise band)")
 print('saved pixel_sbc_depth.png')

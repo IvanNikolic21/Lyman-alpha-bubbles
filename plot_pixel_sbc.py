@@ -44,9 +44,10 @@ for i, name in enumerate(names):
     r = d['ranks_dw'].ravel() if name == 'dw_g (pooled)' else ranks[:, i]
     m = len(r)
     ecdf = np.searchsorted(np.sort(r), grid, side='right') / m - grid
-    # bands scale with the number of ranks in this panel (pooled panel has n_gal x n_queries ranks,
-    # NOT independent across galaxies of one instance -> its band is optimistic; read it as indicative)
-    b1, bk = band * np.sqrt(n / m), band_k * np.sqrt(n / m)
+    # the 43 per-galaxy ranks of one query are strongly correlated (shared posterior samples and
+    # global ionization level), so the pooled panel is NOT n_gal x n_queries independent ranks: use
+    # the n_queries band for it (conservative; scaling by sqrt(n/m) would make it far too narrow)
+    b1, bk = band, band_k
     ax.fill_between(grid, -bk, bk, color=BAND, lw=0, alpha=0.5)
     ax.fill_between(grid, -b1, b1, color=BAND, lw=0)
     ax.axhline(0, color=INK, lw=0.8)

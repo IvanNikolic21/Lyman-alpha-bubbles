@@ -537,8 +537,13 @@ def p_EW(
         else:
             ew0, sigma = TANG24_EW_PARAMS[Tang_sample]
             mu = np.log(ew0)
-        return 1 / np.sqrt(2 * np.pi) / sigma / W * np.exp(
-            -(np.log(W) - mu) ** 2 / 2 / sigma ** 2)
+        # log-normal density; exactly 0 at W <= 0 (the EW grid Ws starts at 0, where the
+        # unguarded formula gives inf * 0 = nan, which poisons the whole CDF -> nan EWs)
+        W = np.asarray(W, dtype=float)
+        W_pos = np.where(W > 0, W, 1.0)
+        dens = 1 / np.sqrt(2 * np.pi) / sigma / W_pos * np.exp(
+            -(np.log(W_pos) - mu) ** 2 / 2 / sigma ** 2)
+        return np.where(W > 0, dens, 0.0)
 
     def sample_GH(muv_arr, beta_arr):
         """Gagnon-Hartman et al. 2026 (arXiv:2602.13389) 'quick implementation'
@@ -566,8 +571,8 @@ def p_EW(
         u2 = np.random.normal(-0.57 * m185 - 0.85, 0.49)
         u3 = np.random.normal(-0.38 * m185 - 0.31, 0.26)
         A_mat = np.array([[1, 1, 1 / 3], [-1, 1, -1], [-1 / 3, 1, 1]])
-        u = np.stack([u1, u2, u3], axis=0)  # (3, N)
-        x0 = A_mat @ u  # (3, N)
+        u_vec = np.stack([u1, u2, u3], axis=0)  # (3, N); NOT `u`, which is astropy.units below
+        x0 = A_mat @ u_vec  # (3, N)
         mu_lya = np.array([42.47, 200.18, 42.03])
         sig_lya = np.array([0.42, 99.7, 0.39])
         x = sig_lya[:, None] * x0 + mu_lya[:, None]
