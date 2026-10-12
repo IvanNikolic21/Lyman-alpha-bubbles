@@ -4,21 +4,31 @@ Plots mock_recovery_demo.py's output: for each toy example, TRUE theta
 with the INFERRED marginal probability map from running inference against
 it -- the "does this work on mock data, where we know the answer" check.
 
-One figure per example (not one big grid) -- meant to become individual
-slides directly, each self-contained with its own title/caption baked in
-as the figure's own text, per the explicit feedback that prior figures
-needed more description to be legible on their own.
+What to actually look for (corrected after a wrong first read of this same
+plot): NOT whether the inferred map recovers the true GLOBAL ionized
+fraction -- that was never the target of this method. Look at the FIRST
+band nearest the source (low LOS bin index): per-galaxy variation there
+(which galaxies show a purple/dark dip vs. which stay bright) is the part
+that's expected to carry real signal, since damping-wing absorption
+sensitivity is dominated by gas near each galaxy's own redshift -- and it
+should visually track the true map's own first-band pattern. Bands further
+from the source are expected to be much less informative or flat; getting
+even faint traces there is a bonus, not a baseline to fail against.
+
+One PDF per example (not a combined figure) -- large labels, all text
+black, no editorializing captions with a built-in verdict.
 """
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 REPO = "/Users/dxf836/Documents/git_code/Lyman-alpha-bubbles"
 RECOVERY_PATH = "/Users/dxf836/Documents/Lya_bubbles/SBI_on_mock_lightcones/mock_recovery_demo.npz"
 
-INK_PRIMARY, INK_SECOND, INK_MUTED = "#0b0b0b", "#52514e", "#898781"
-SURFACE, GRID = "#fcfcfb", "#e1e0d9"
+BLACK = "black"
+SURFACE = "white"
 C_ION, C_NEU = "#1baf7a", "#383835"
 CMAP_SEQ = "magma"
 
@@ -26,10 +36,8 @@ CMAP_SEQ = "magma"
 def plot_one_example(theta_true, marginal_map, ess, pool_size, example_idx, out_path):
     n_gal, n_los = theta_true.shape
     x_ion_true = 1.0 - theta_true.mean()
-    x_ion_est = 1.0 - marginal_map.mean()
-    mae = np.abs(marginal_map - theta_true).mean()
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6.5))
     fig.patch.set_facecolor(SURFACE)
 
     cmap_bin = matplotlib.colors.ListedColormap([C_ION, C_NEU])
@@ -37,39 +45,37 @@ def plot_one_example(theta_true, marginal_map, ess, pool_size, example_idx, out_
     ax.set_facecolor(SURFACE)
     ax.imshow(theta_true, aspect="auto", cmap=cmap_bin, vmin=0, vmax=1,
               extent=[0, n_los, 0, n_gal], origin="lower")
-    ax.set_title(f"TRUE ionization state\n(x_ion = {x_ion_true:.2f})",
-                color=INK_PRIMARY, fontsize=12, loc="left")
-    ax.set_xlabel("LOS bin (0=source, end=z_end)", color=INK_SECOND, fontsize=9.5)
-    ax.set_ylabel("galaxy", color=INK_SECOND, fontsize=9.5)
-    ax.tick_params(colors=INK_MUTED, labelsize=8)
+    ax.set_title(f"TRUE ionization state (x_ion = {x_ion_true:.2f})",
+                color=BLACK, fontsize=16, loc="left")
+    ax.set_xlabel("LOS bin (0 = source, end = z_end)", color=BLACK, fontsize=14)
+    ax.set_ylabel("galaxy", color=BLACK, fontsize=14)
+    ax.tick_params(colors=BLACK, labelsize=12)
 
     ax = axes[1]
     ax.set_facecolor(SURFACE)
     im = ax.imshow(marginal_map, aspect="auto", cmap=CMAP_SEQ, vmin=0, vmax=1,
                    extent=[0, n_los, 0, n_gal], origin="lower")
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="P(neutral)")
-    ax.set_title(f"INFERRED probability of neutral gas\n(implied x_ion = {x_ion_est:.2f})",
-                color=INK_PRIMARY, fontsize=12, loc="left")
-    ax.set_xlabel("LOS bin (0=source, end=z_end)", color=INK_SECOND, fontsize=9.5)
-    ax.tick_params(colors=INK_MUTED, labelsize=8)
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("P(neutral)", color=BLACK, fontsize=14)
+    cbar.ax.tick_params(colors=BLACK, labelsize=12)
+    ax.set_title("INFERRED probability of neutral gas", color=BLACK, fontsize=16, loc="left")
+    ax.set_xlabel("LOS bin (0 = source, end = z_end)", color=BLACK, fontsize=14)
+    ax.tick_params(colors=BLACK, labelsize=12)
 
     fig.suptitle(f"Toy example {example_idx}: known-truth recovery check",
-                 color=INK_PRIMARY, fontsize=15, fontweight="bold", x=0.02, ha="left", y=1.03)
-    fig.text(0.02, -0.04,
-            f"Method: this galaxy/observation set was generated from the TRUE map on the left "
-            f"(never shown to the inference). The right panel is what the trained network infers "
-            f"from ONLY the resulting noisy observations, evaluated against a held-out pool of "
-            f"{pool_size:,} other simulated universes it was never trained on directly.\n"
-            f"Recovery quality: effective sample size {ess:.0f}/{pool_size-1:,} "
-            f"({100*ess/(pool_size-1):.1f}%) -- mean |inferred - true| per pixel = {mae:.3f}.",
-            color=INK_SECOND, fontsize=9.5, ha="left", va="top", wrap=True)
+                 color=BLACK, fontsize=19, fontweight="bold", x=0.02, ha="left", y=1.02)
+    fig.text(0.02, -0.05,
+            f"This observation was generated from the TRUE map on the left (never shown to "
+            f"inference). The right panel is inferred from only the resulting noisy observations, "
+            f"evaluated against a held-out pool of {pool_size - 1:,} other simulated universes "
+            f"(ESS = {ess:.0f}, {100 * ess / (pool_size - 1):.1f}% of pool).",
+            color=BLACK, fontsize=13, ha="left", va="top", wrap=True)
 
-    from matplotlib.patches import Patch
     fig.legend(handles=[Patch(facecolor=C_ION, label="ionized"), Patch(facecolor=C_NEU, label="neutral")],
-               loc="upper right", ncol=1, frameon=False, fontsize=9, bbox_to_anchor=(0.99, 1.06),
-               labelcolor=INK_SECOND)
+               loc="upper right", ncol=1, frameon=False, fontsize=13, bbox_to_anchor=(0.99, 1.05),
+               labelcolor=BLACK)
 
-    fig.savefig(out_path, dpi=150, facecolor=SURFACE, bbox_inches="tight")
+    fig.savefig(out_path, facecolor=SURFACE, bbox_inches="tight")
     print(f"[saved] {out_path}", flush=True)
 
 
@@ -81,7 +87,7 @@ def main():
         theta_true = d[f"example_{i}__theta_true"]
         marginal_map = d[f"example_{i}__marginal_map"]
         ess = float(d[f"example_{i}__ess"])
-        out_path = f"{REPO}/mock_recovery_example_{i}.png"
+        out_path = f"{REPO}/mock_recovery_example_{i}.pdf"
         plot_one_example(theta_true, marginal_map, ess, pool_size, i, out_path)
 
 

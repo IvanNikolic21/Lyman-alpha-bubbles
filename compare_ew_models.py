@@ -8,9 +8,20 @@ Figure 1 (ew_model_posteriors.png):
   a  posterior of the near-source neutral fraction (first N_NEAR bins of all sightlines; Lya-informed)
   b  posterior of the global neutral fraction (mostly prior structure, see sbi_pixel_sbc.py)
   c  per-galaxy near-source P(neutral): each model vs the reference
-Figure 2 (ew_model_maps.png): marginal P(neutral) maps per model + difference to the reference.
+Figure 2 (ew_model_maps.png): marginal P(neutral) maps per model + difference to the reference,
+  x = LOS bin index.
+Figure 3 (ew_model_maps_z.png, only with catalog=...): the same maps with x = REDSHIFT. Each galaxy's
+  row is drawn at its own bins' redshifts (from z_end = 5.3 up to the galaxy), so structure at a common
+  redshift lines up vertically instead of appearing as a diagonal. Bin k of galaxy g spans comoving
+  distance d_C(z_g) - [k, k+1] * Delta_g, Delta_g = (d_C(z_g) - d_C(5.3)) / n_los (Planck18), the same
+  equal-comoving-width bins as lyabubbles.lightcone_field.bin_z_edges (which starts the sightline at
+  d_C(z0) + z_gal, i.e. 0.25 cMpc from d_C(z_g) for GOODS-N -- negligible at this resolution).
 
-Usage: python compare_ew_models.py exponential=path/pixel_infer.npz tang_muv=... gagnon_hartman=...
+Usage: python compare_ew_models.py exponential=path/pixel_infer.npz tang_muv=... gagnon_hartman=... \
+           [catalog=catalog.npz] [zmin=6.5]
+  catalog.npz must hold the galaxy redshifts (key `z`) in the SAME order as the posterior rows, i.e.
+  the order of rdr._S.redshifts (the GOODS-N catalog is z-sorted; ~/Downloads/catalog43.npz matches).
+  zmin sets the low-redshift edge of figure 3 (default: z_end = 5.3).
 """
 import sys
 import numpy as np
@@ -24,8 +35,16 @@ FALLBACK = ['#2a78d6', '#eb6834', '#1baf7a', '#8a6fd6']
 INK, MUTED = '#0b0b0b', '#52514e'
 
 runs = []
+z_gal = None          # galaxy redshifts in posterior-row order (enables figure 3)
+zmin = 5.3            # low-redshift edge of figure 3
 for i, arg in enumerate(sys.argv[1:]):
     name, path = arg.split('=', 1)
+    if name == 'catalog':
+        z_gal = np.asarray(np.load(path, allow_pickle=True)['z'], dtype=float)
+        continue
+    if name == 'zmin':
+        zmin = float(path)
+        continue
     d = np.load(path)
     js = d['joint_samples']
     runs.append(dict(name=name, label=LABELS.get(name, name), c=COLORS.get(name, FALLBACK[i % 4]),
@@ -93,3 +112,45 @@ fig.colorbar(im, ax=axs[0, :].tolist(), label='P(neutral)')
 fig.colorbar(imd, ax=axs[1, :].tolist(), label='Δ P(neutral)')
 fig.savefig('ew_model_maps.png', dpi=170, bbox_inches='tight')
 print('saved ew_model_posteriors.png, ew_model_maps.png')
+
+# ---------------- Figure 3: maps on a redshift axis ----------------
+if z_gal is not None:
+    from astropy.cosmology import Planck18 as Cosmo
+    n_gal, n_los = ref['m'].shape
+    if len(z_gal) != n_gal:
+        sys.exit(f"catalog has {len(z_gal)} redshifts, posterior has {n_gal} rows")
+    Z_END = 5.3
+    zg = np.linspace(Z_END - 0.1, z_gal.max() + 0.1, 4000)          # d_C(z) table, inverted by interp
+    dg = Cosmo.comoving_distance(zg).value
+    d_gal = np.interp(z_gal, zg, dg)
+    width = (d_gal - np.interp(Z_END, zg, dg)) / n_los                 # bin width per galaxy [cMpc]
+    d_edges = d_gal[:, None] - np.arange(n_los + 1)[None, :] * width[:, None]   # (n_gal, n_los + 1)
+    z_edges = np.interp(d_edges, dg, zg)                               # edge 0 = galaxy, edge n_los = z_end
+    print(f"bin widths {width.min():.2f}-{width.max():.2f} cMpc")
+
+    def zmap(ax, m, **kw):
+        for g in range(n_gal):     # one row per galaxy, each with its own redshift edges
+            qm = ax.pcolormesh(z_edges[g][::-1], [g - 0.5, g + 0.5], m[g][::-1][None, :],
+                               shading='flat', rasterized=True, **kw)
+        ax.plot(z_gal, np.arange(n_gal), 'o', ms=2.2, color=INK, zorder=3)   # galaxy positions
+        ax.set_xlim(zmin, z_gal.max() + 0.02); ax.set_ylim(n_gal - 0.5, -0.5)
+        yt = np.linspace(0, n_gal - 1, 6).round().astype(int)
+        ax.set_yticks(yt); ax.set_yticklabels([f'{z_gal[t]:.2f}' for t in yt])
+        ax.set_xlabel('redshift'); ax.set_ylabel('galaxy (labelled by its z)')
+        return qm
+
+    fig, axs = plt.subplots(2, n, figsize=(4.6 * n, 7), squeeze=False, layout='constrained')
+    for j, r in enumerate(runs):
+        im = zmap(axs[0, j], r['m'], cmap='Blues', vmin=0, vmax=vmax)
+        axs[0, j].set_title(r['label'], fontsize=10, color=r['c'])
+        if j == 0:
+            axs[1, j].axis('off')
+            axs[1, j].text(0.5, 0.5, 'reference', ha='center', va='center', color=MUTED,
+                           transform=axs[1, j].transAxes)
+            continue
+        imd = zmap(axs[1, j], r['m'] - ref['m'], cmap='RdBu_r', vmin=-dmax, vmax=dmax)
+        axs[1, j].set_title(f"minus {ref['name']}", fontsize=10)
+    fig.colorbar(im, ax=axs[0, :].tolist(), label='P(neutral)')
+    fig.colorbar(imd, ax=axs[1, :].tolist(), label='Δ P(neutral)')
+    fig.savefig('ew_model_maps_z.png', dpi=170, bbox_inches='tight')
+    print('saved ew_model_maps_z.png')
