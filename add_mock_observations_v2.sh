@@ -28,8 +28,14 @@
 # Needs the full py21cmfast-dependent stack, unlike generate_bubble_mocks.py.
 
 EW_MODEL=${1:?usage: sbatch add_mock_observations_v2.sh <exponential|tang_muv|gagnon_hartman>}
+# Repo directory on the cluster, holding the two catalog files. Edit here, or override at submission:
+#     REPO=/path/to/repo sbatch add_mock_observations_v2.sh exponential
+REPO=${REPO:-/groups/astro/ivannik/programs/Lyman-alpha-bubbles}
 
 python add_mock_observations.py \
+    --lya_catalog "${REPO}/tb_lya.txt" \
+    --properties_catalog "${REPO}/sample_nirspec_properties.txt" \
+    --main_dir "${REPO}/" \
     --mocks_dir bubble_mocks_v2_run1 \
     --output_dir "bubble_mocks_v2_run1_x_${EW_MODEL}" \
     --ew_model "${EW_MODEL}" \
