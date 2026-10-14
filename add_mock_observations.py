@@ -96,6 +96,7 @@ python add_mock_observations.py --mocks_dir bubble_mocks_run1 \\
 # --- standard library ---
 import argparse   # command-line interface
 import glob       # find the mock batch files on disk
+import json       # read the mock directory's run_config.json (completeness check)
 import os         # path handling, directory creation
 import re         # parse the batch index out of a file name
 
@@ -256,14 +257,18 @@ def _compute_tau_and_x_for_batch(masks, meta, z_b_edges, z_e_edges, n_los,
 
 
 def process_split(meta, mocks_dir, output_dir, prefix, n_los, z_b_edges, z_e_edges,
-                  main_dir, ew_model, seed):
+                  main_dir, ew_model, seed, task_id=0, n_tasks=1):
     """Forward-model every mock batch file `{prefix}_batch_*.npz` ("train" or "val") found in
     `mocks_dir` and write one output file per batch to `output_dir`.
 
     Resumable: a batch whose output file already exists is skipped. The noise seed of each
     batch is drawn from one master generator in a fixed order whether or not the batch is
     skipped, so a resumed run assigns every batch the same noise seed as an uninterrupted
-    run (but see module docstring, approximation c: the galaxy draws are not seeded)."""
+    run (but see module docstring, approximation c: the galaxy draws are not seeded).
+
+    Parallel: n_tasks independent processes (a SLURM array) split the batches round-robin, task
+    task_id processing the batches with batch_idx % n_tasks == task_id. Every task still draws
+    the noise seeds of ALL batches, so a batch gets the same noise seed whichever task runs it."""
     # all input batch files of this split, sorted so batch order is deterministic
     paths = sorted(glob.glob(os.path.join(mocks_dir, f"{prefix}_batch_*.npz")))
     if not paths:
@@ -286,6 +291,8 @@ def process_split(meta, mocks_dir, output_dir, prefix, n_los, z_b_edges, z_e_edg
         # resumability logic of generate_bubble_mocks.py).
         batch_rng = np.random.default_rng(rng_master.integers(0, 2**31 - 1))
 
+        if batch_idx % n_tasks != task_id:            # another array task's batch: seed drawn, skip it
+            continue
         if os.path.exists(out_path):
             # Already done: check the stored size matches the input, warn if not (an output from a
             # run with different batch sizes would otherwise be silently reused).
@@ -318,7 +325,27 @@ def main():
     p.add_argument("--seed", type=int, default=0,
                    help="Seeds the noise-injection RNG only (theta itself is already fixed by "
                         "the mock files) -- independent of generate_bubble_mocks.py's --seed.")
+    p.add_argument("--task_id", type=int, default=0,
+                   help="This process's index among --n_tasks (e.g. $SLURM_ARRAY_TASK_ID).")
+    p.add_argument("--n_tasks", type=int, default=1,
+                   help="Number of parallel processes splitting the batches round-robin.")
     args = p.parse_args()
+    if not 0 <= args.task_id < args.n_tasks:
+        raise ValueError(f"--task_id {args.task_id} must be in [0, --n_tasks {args.n_tasks})")
+
+    # Completeness check (v2 mock directories, whose run_config.json records both split sizes).
+    # Noise seeds are assigned to the batch files in sorted order, so a missing file -- e.g. a
+    # generate_bubble_mocks.py array task that has not finished yet -- would shift the seeds of
+    # all later batches between runs. Refuse to start until every mock batch exists.
+    cfg_path = os.path.join(args.mocks_dir, "run_config.json")
+    cfg = json.load(open(cfg_path)) if os.path.exists(cfg_path) else {}
+    if "n_sim_val" in cfg:
+        for prefix, n in (("train", cfg["n_sim"]), ("val", cfg["n_sim_val"])):
+            n_expected = -(-n // cfg["batch_size"])           # ceil(n / batch_size)
+            n_found = len(glob.glob(os.path.join(args.mocks_dir, f"{prefix}_batch_*.npz")))
+            if n_found != n_expected:
+                raise RuntimeError(f"{args.mocks_dir}: {n_found} {prefix} batch files, expected "
+                                   f"{n_expected} -- is generate_bubble_mocks.py still running?")
 
     # Load the real catalog: deduplicate, apply the z-window and Muv cut, convert RA/Dec/z to
     # comoving coordinates centred on the sample, and fill the catalog-fixed fields of rdr._S
@@ -354,10 +381,12 @@ def main():
     # Training and validation splits. The validation noise seed is offset by 1e6 so the two splits
     # never share a noise stream.
     process_split(meta, args.mocks_dir, args.output_dir, "train", args.n_los,
-                  z_b_edges, z_e_edges, args.main_dir, args.ew_model, args.seed)
+                  z_b_edges, z_e_edges, args.main_dir, args.ew_model, args.seed,
+                  task_id=args.task_id, n_tasks=args.n_tasks)
     process_split(meta, args.mocks_dir, args.output_dir, "val", args.n_los,
-                  z_b_edges, z_e_edges, args.main_dir, args.ew_model, args.seed + 1_000_000)
-    print(f"[add_x] done: {args.output_dir}", flush=True)
+                  z_b_edges, z_e_edges, args.main_dir, args.ew_model, args.seed + 1_000_000,
+                  task_id=args.task_id, n_tasks=args.n_tasks)
+    print(f"[add_x] task {args.task_id}/{args.n_tasks} done: {args.output_dir}", flush=True)
 
 
 if __name__ == "__main__":
