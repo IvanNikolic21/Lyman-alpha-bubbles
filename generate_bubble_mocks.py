@@ -190,6 +190,63 @@ def generate_split(n_sim, batch_size, seed, output_dir, prefix, geom, k_grid, me
         batch_idx += 1
 
 
+def generate_split_v2(n_sim, batch_size, seed, output_dir, prefix, geom, cat, n_los, bsd_calibration,
+                      task_id=0, n_tasks=1):
+    """As generate_split, for the v2 prior (bubble_prior_v2.py): redshift-dependent ionized fraction, bubble sizes
+    calibrated to Lu+24 as a function of x_ion, and optional host bubbles around the galaxies. Same resumability
+    rules: every batch's random numbers are drawn from rng_master whether or not the batch is computed.
+
+    Parallel: n_tasks independent processes (a SLURM array) split the batches round-robin, task task_id computing
+    the batches with batch_idx % n_tasks == task_id. Every task draws the random numbers of ALL batches from
+    rng_master, so a batch's mocks are identical whichever task computes it and however many tasks there are."""
+    import bubble_prior_v2 as bp
+    bsd = bp.BSD(bsd_calibration)
+    los_z = bp.LOSRedshift(cat["z0"], cat["z_mean"])
+    x_gal, y_gal, z_gal = cat["x_gal"], cat["y_gal"], cat["z_gal"]
+    n_gal = len(x_gal)
+    rng_master = np.random.default_rng(seed)
+    n_done, batch_idx = 0, 0
+    while n_done < n_sim:
+        this_batch = min(batch_size, n_sim - n_done)
+        out_path = os.path.join(output_dir, f"{prefix}_batch_{batch_idx:05d}.npz")
+        hist = np.array([bp.draw_history(rng_master) for _ in range(this_batch)])    # (z_mid, dz, x_hi_7, z_end)
+        zeta = rng_master.uniform(*bp.ZETA_RANGE, size=this_batch)
+        f_host = rng_master.uniform(*bp.F_HOST_RANGE, size=this_batch)
+        mock_seeds = rng_master.integers(0, 2**31 - 1, size=this_batch)
+
+        if batch_idx % n_tasks != task_id:            # another array task's batch: random numbers drawn, skip it
+            n_done += this_batch
+            batch_idx += 1
+            continue
+        if os.path.exists(out_path):
+            existing_n = len(np.load(out_path)["x_ion"])
+            print(f"[generate_v2:{prefix}] {out_path} exists ({existing_n} sims), skipping (resumable).", flush=True)
+            n_done += existing_n
+            batch_idx += 1
+            continue
+
+        masks = np.zeros((this_batch, n_gal, n_los), dtype=np.uint8)
+        n_bubbles = np.zeros(this_batch, dtype=np.int64)
+        hosted = np.zeros((this_batch, n_gal), dtype=bool)
+        realized_z = np.zeros((this_batch, len(bp.Z_SLICES) - 1))
+        for j in range(this_batch):
+            masks[j], n_bubbles[j], hosted[j], realized_z[j] = bp.generate_one_mock_v2(
+                np.random.default_rng(mock_seeds[j]), hist[j, 0], hist[j, 1], zeta[j], f_host[j], bsd, los_z,
+                geom, x_gal, y_gal, z_gal, geom["z_end_offset"], n_los)
+        # x_ion: ionized fraction of the tanh history at the field-mean redshift z0 (the key add_mock_observations
+        # uses to count sims; also the natural "global" parameter to compare with v1's x_ion)
+        x_ion = 1 - bp.x_hi_of_z(cat["z0"], hist[:, 0], hist[:, 1])
+        tau = np.array([bp.tau_reionization(zm, d) for zm, d in hist[:, :2]])
+        np.savez(out_path, x_ion=x_ion, z_mid=hist[:, 0], dz=hist[:, 1], x_hi_7=hist[:, 2], z_end=hist[:, 3],
+                 tau_e=tau, zeta=zeta, f_host=f_host,
+                 hosted=hosted, n_bubbles=n_bubbles, masks=masks, realized=masks.mean(axis=(1, 2)),
+                 realized_z=realized_z, z_slices=bp.Z_SLICES)
+        print(f"[generate_v2:{prefix}] batch {batch_idx} ({this_batch} sims) saved to {out_path} "
+              f"-- realized ionized fraction mean={masks.mean():.3f}", flush=True)
+        n_done += this_batch
+        batch_idx += 1
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--n_sim", type=int, default=15000, help="Training mocks.")
@@ -204,6 +261,14 @@ def main():
     p.add_argument("--k_factor_lo", type=float, default=0.3)
     p.add_argument("--k_factor_hi", type=float, default=3.0)
     p.add_argument("--z_hi", type=float, default=7.3, help="Real-catalog redshift window upper edge.")
+    p.add_argument("--prior", type=str, default="v1", choices=["v1", "v2"],
+                   help="v1: one x_ion and BSD per mock (default, unchanged). v2: bubble_prior_v2.py.")
+    p.add_argument("--bsd_calibration", type=str, default=None,
+                   help="v2 only: bsd_lu24_calibration.npz from calibrate_bsd_lu24.py.")
+    p.add_argument("--task_id", type=int, default=0,
+                   help="v2 only: this process's index among --n_tasks (e.g. $SLURM_ARRAY_TASK_ID).")
+    p.add_argument("--n_tasks", type=int, default=1,
+                   help="v2 only: number of parallel processes splitting the batches round-robin.")
     p.add_argument("--repo", type=str, default=REPO_DEFAULT,
                    help="Path to the Lyman-alpha-bubbles repo (for tb_lya.txt/sample_nirspec_properties.txt).")
     args = p.parse_args()
@@ -216,6 +281,29 @@ def main():
     print(f"[setup] {n_gal} real galaxies, z<={args.z_hi}. Evaluation box: "
           f"x_half={geom['x_half']:.2f} y_half={geom['y_half']:.2f} Mpc, "
           f"z in [{geom['z_lo']:.2f},{geom['z_hi']:.2f}] Mpc", flush=True)
+
+    n_sim_val = args.n_sim_val if args.n_sim_val is not None else max(1, args.n_sim // 5)
+    if args.prior == "v2":
+        import bubble_prior_v2 as bp
+        if args.bsd_calibration is None:
+            raise ValueError("--prior v2 needs --bsd_calibration")
+        if not 0 <= args.task_id < args.n_tasks:
+            raise ValueError(f"--task_id {args.task_id} must be in [0, --n_tasks {args.n_tasks})")
+        if args.task_id == 0:                         # one writer, so parallel tasks do not race on the file
+            with open(os.path.join(args.output_dir, "run_config.json"), "w") as f:
+                json.dump(dict(prior="v2", n_gal=n_gal, n_los=args.n_los, z_hi=args.z_hi,
+                               bsd_calibration=os.path.abspath(args.bsd_calibration), z_ref=bp.Z_REF,
+                               x_hi_7_range=bp.X_HI_7_RANGE, z_end_range=bp.Z_END_RANGE, x_hi_end=bp.X_HI_END,
+                               zeta_range=bp.ZETA_RANGE,
+                               f_host_range=bp.F_HOST_RANGE, x_ion_cap=bp.X_ION_CAP, slab=bp.SLAB,
+                               n_sim=args.n_sim, n_sim_val=n_sim_val, batch_size=args.batch_size,
+                               seed=args.seed, n_tasks=args.n_tasks), f, indent=2)
+        for n, s, pre in ((args.n_sim, args.seed, "train"), (n_sim_val, args.seed + 1_000_000, "val")):
+            generate_split_v2(n, args.batch_size, s, args.output_dir, pre, geom, cat, args.n_los,
+                              args.bsd_calibration, task_id=args.task_id, n_tasks=args.n_tasks)
+        print(f"[done] v2 prior, task {args.task_id}/{args.n_tasks}: its share of {args.n_sim} train + "
+              f"{n_sim_val} val mocks in {args.output_dir}", flush=True)
+        return
 
     k_grid, mean_vol_grid = build_mean_vol_lookup(args.k_factor_lo, args.k_factor_hi)
     print(f"[setup] mean_vol(K) lookup table built, K in [{k_grid.min():.3f},{k_grid.max():.3f}]", flush=True)
