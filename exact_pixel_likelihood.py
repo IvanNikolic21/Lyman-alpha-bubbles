@@ -175,6 +175,7 @@ class GalaxyModel:
         self.d_c0 = Cosmo.comoving_distance(cat['z0']).to(u.Mpc).value
         np.random.seed(seed)                                  # p_EW draws from numpy's global state
         self.rng = np.random.default_rng(seed)
+        self._tr_cache = {}                                   # transmission(): (C, A) per (g, n_los, n_dv)
 
     def mu(self, g, theta_g, n_los):
         """theta_g: (n_pool, n_los) sightline columns of galaxy g. Returns mu (n_pool, M)."""
@@ -198,16 +199,22 @@ class GalaxyModel:
         at the equal-probability quantiles of the Mason+18 log-normal,
             log10 dv_k = mu_dv(Muv, z0) + 0.24 * Phi^-1((k + 1/2) / n_dv),   k = 0 .. n_dv - 1,
         so that mean_k h(dv_k) is a midpoint-rule integral over the dv distribution (no random noise).
-        Returns T (n_pool, n_dv)."""
-        c = self.cat
-        z_b, z_e = lf.bin_z_edges(n_los, c['z_gal'][g], self.d_c0, z_end=lf.Z_END_DEFAULT)
-        C = np.stack([lf.segments_to_tau(z_b[k:k + 1], z_e[k:k + 1], np.ones(1), c['z_gal_red'][g], self.wv)
-                      for k in range(n_los)])               # (n_los, n_wave): tau of each bin if neutral
-        dv = 10 ** (self.delta_v_func(c['muv'][g], c['z0'])
-                    + 0.24 * ndtri((np.arange(n_dv) + 0.5) / n_dv))
-        J = np.exp(-0.5 * ((self.dv_grid[None, :] - dv[:, None]) / dv[:, None]) ** 2) / dv[:, None]
-        J /= (J * self.wq).sum(axis=1, keepdims=True)         # unit integral over the grid
-        A = J * self.tau_CGM(c['muv'][g], main_dir=REPO)[None, :] * self.wq
+        Returns T (n_pool, n_dv).
+        C and A depend only on (g, n_los, n_dv), not on the pool, so they are computed once per galaxy and
+        cached: a pool processed in chunks (exact_pixel_likelihood_chunked.py) does not rebuild them."""
+        key = (g, n_los, n_dv)
+        if key not in self._tr_cache:
+            c = self.cat
+            z_b, z_e = lf.bin_z_edges(n_los, c['z_gal'][g], self.d_c0, z_end=lf.Z_END_DEFAULT)
+            C = np.stack([lf.segments_to_tau(z_b[k:k + 1], z_e[k:k + 1], np.ones(1), c['z_gal_red'][g], self.wv)
+                          for k in range(n_los)])           # (n_los, n_wave): tau of each bin if neutral
+            dv = 10 ** (self.delta_v_func(c['muv'][g], c['z0'])
+                        + 0.24 * ndtri((np.arange(n_dv) + 0.5) / n_dv))
+            J = np.exp(-0.5 * ((self.dv_grid[None, :] - dv[:, None]) / dv[:, None]) ** 2) / dv[:, None]
+            J /= (J * self.wq).sum(axis=1, keepdims=True)     # unit integral over the grid
+            A = J * self.tau_CGM(c['muv'][g], main_dir=REPO)[None, :] * self.wq
+            self._tr_cache[key] = (C, A)
+        C, A = self._tr_cache[key]
         return np.exp(-(theta_g @ C)) @ A.T                   # (n_pool, n_dv)
 
     def ew_distribution(self, g):
