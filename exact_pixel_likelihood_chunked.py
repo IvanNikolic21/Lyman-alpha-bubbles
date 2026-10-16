@@ -47,6 +47,7 @@ import time
 import argparse
 
 import numpy as np
+from scipy.special import logsumexp
 
 import exact_pixel_likelihood as epl
 
@@ -178,11 +179,19 @@ def run_combine(args):
     labels = [str(s[0]) if len(s) == 1 else ','.join(map(str, s)) for s in sets]
 
     logw = np.vstack([L + log_prior_tau] + [L - loglik[:, s].sum(axis=1) + log_prior_tau for s in sets])
+
+    # ---- evidence Z = p(x | EW model) ----
+    # The pool maps are prior draws, so Z = E_prior[p(x | theta)] is estimated by the pool mean of exp L
+    # (with the tau prior: the tau-weighted mean). Its relative MC error is ~ sqrt(1/ESS - 1/N), with ESS the
+    # posterior ESS. Comparable between EW models because they share the same pool maps.
+    log_z = logsumexp(logw[0]) - logsumexp(log_prior_tau)
     logw -= logw.max(axis=1, keepdims=True)
     W = np.exp(logw)
     W /= W.sum(axis=1, keepdims=True)                        # (1 + n_sets, N), rows sum to 1
     ess = 1.0 / np.sum(W ** 2, axis=1)
-    print(f"[combine] exact-likelihood posterior: ESS {ess[0]:.1f} of {N}", flush=True)
+    log_z_err = np.sqrt(max(1.0 / ess[0] - 1.0 / N, 0.0))
+    print(f"[combine] exact-likelihood posterior: ESS {ess[0]:.1f} of {N}; "
+          f"log evidence ln Z = {log_z:.3f} +- {log_z_err:.3f}", flush=True)
 
     # ---- one streaming pass over theta: every set's weighted mean map ----
     maps = np.zeros((len(W), n_gal * n_los))
@@ -209,6 +218,7 @@ def run_combine(args):
                x_obs=np.concatenate([ew_obs, is_ul.astype(float)]).astype(np.float32),
                redshifts=cat['z_gal_red'], n_gal=n_gal, n_los=n_los, off_support=off_support,
                ew_model=args.ew_model, w=W[0], L=L, log_prior_tau=log_prior_tau,
+               log_evidence=log_z, log_evidence_err=log_z_err,
                tau_prior=np.array(args.tau_prior if args.tau_prior else [np.nan, np.nan]),
                pool_files=np.array([os.path.basename(p) for _, p in files]), pool_counts=counts)
     out.update({f'hyper_{k}': v for k, v in hyper.items()})

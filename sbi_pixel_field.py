@@ -421,12 +421,17 @@ def run_infer(args):
 
     x_obs = _build_x_obs()
     x_obs_t = torch.as_tensor(x_obs, dtype=torch.float32, device=args.device)
-    theta_pool_t = torch.as_tensor(theta_pool, dtype=torch.float32, device=args.device)
-    x_obs_tiled = x_obs_t.unsqueeze(0).expand(len(theta_pool), -1)
 
+    # Forward pass in chunks of --chunk pool maps: the whole pool at once needs memory for every map's
+    # activations simultaneously (too much for the 200k-map v2 val pool). In eval mode every map's output
+    # depends only on that map (no batch statistics, no dropout), so chunking does not change the result.
+    ratio_estimator.eval()
+    log_ratio = np.empty(len(theta_pool))
     with torch.no_grad():
-        log_ratio = ratio_estimator(theta=theta_pool_t, x=x_obs_tiled).squeeze(-1)
-    log_ratio = log_ratio.detach().cpu().numpy()
+        for a in range(0, len(theta_pool), args.chunk):
+            theta_t = torch.as_tensor(theta_pool[a:a + args.chunk], dtype=torch.float32, device=args.device)
+            x_tiled = x_obs_t.unsqueeze(0).expand(len(theta_t), -1)
+            log_ratio[a:a + len(theta_t)] = ratio_estimator(theta=theta_t, x=x_tiled).squeeze(-1).cpu().numpy()
 
     # Self-normalized importance weights -- mirrors
     # `real_data_run.py::fesc_effective_sample_size`'s pattern for the same
@@ -532,6 +537,8 @@ if __name__ == '__main__':
     p_infer.add_argument('--n_samples', type=int, default=1000,
                          help='Number of joint map samples to draw via SIR.')
     p_infer.add_argument('--device', type=str, default='cpu')
+    p_infer.add_argument('--chunk', type=int, default=5000,
+                         help='Pool maps per forward pass (memory bound only; does not change results).')
     p_infer.add_argument('--seed', type=int, default=0)
     p_infer.add_argument('--output_dir', type=str, required=True)
 

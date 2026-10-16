@@ -20,17 +20,22 @@
 
 EW_MODEL=${1:?usage: sbatch exact_v2_combine.sh <exponential|tang_muv|gagnon_hartman> [tau]}
 REPO=${REPO:-/groups/astro/ivannik/programs/Lyman-alpha-bubbles}
+# SPLITS: the pool. Default train + val (1.2M maps, best ESS). SPLITS=val gives the 200k val pool the network's
+# `infer --pool_split val` uses, for the exact-vs-network comparison (compare_exact_nn_v2.py):
+#     SPLITS=val sbatch exact_v2_combine.sh exponential        -> exact_v2_exponential_val.npz
+SPLITS=${SPLITS:-train val}
 TAU_ARGS=()
 SUFFIX=""
+[ "${SPLITS}" = "val" ] && SUFFIX="_val"
 if [ "${2:-}" = "tau" ]; then
     TAU_ARGS=(--tau_prior 0.054 0.014)
-    SUFFIX="_tau"
+    SUFFIX="${SUFFIX}_tau"
 fi
 
 python "${REPO}/exact_pixel_likelihood_chunked.py" combine \
     --ew_model "${EW_MODEL}" \
     --pool_dir "bubble_mocks_v2_run1_x_${EW_MODEL}" \
-    --splits train val \
+    --splits ${SPLITS} \
     --loglik_dir "exact_v2_${EW_MODEL}" \
     --mocks_dir bubble_mocks_v2_run1 \
     --lya_catalog "${REPO}/tb_lya.txt" \
