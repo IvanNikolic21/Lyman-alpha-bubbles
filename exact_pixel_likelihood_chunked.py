@@ -178,7 +178,15 @@ def run_combine(args):
     sets = [[g] for g in range(n_gal)] + epl.parse_groups(args.groups, n_gal)
     labels = [str(s[0]) if len(s) == 1 else ','.join(map(str, s)) for s in sets]
 
-    logw = np.vstack([L + log_prior_tau] + [L - loglik[:, s].sum(axis=1) + log_prior_tau for s in sets])
+    # Leave-out log-likelihoods as sums over the REMAINING galaxies, not L - l_s: a map that a left-out galaxy
+    # alone rules out (l_g = -inf, e.g. a bright detection behind an opaque sightline when p_EW has no mass at
+    # EW = 0, as for tang*) would otherwise give -inf - (-inf) = NaN and corrupt that set's weights.
+    def without(s):
+        keep = np.ones(n_gal, bool)
+        keep[s] = False
+        return loglik[:, keep].sum(axis=1)
+
+    logw = np.vstack([L + log_prior_tau] + [without(s) + log_prior_tau for s in sets])
 
     # ---- evidence Z = p(x | EW model) ----
     # The pool maps are prior draws, so Z = E_prior[p(x | theta)] is estimated by the pool mean of exp L

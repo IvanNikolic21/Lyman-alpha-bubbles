@@ -466,7 +466,11 @@ def main():
     labels = [str(s[0]) if len(s) == 1 else ','.join(map(str, s)) for s in sets]
     p_minus = np.empty((len(sets), n_gal, n_los)); ess_minus = np.empty(len(sets))
     for si, members in enumerate(sets):
-        _, ess_minus[si], p_minus[si] = weights_and_map(L - loglik[:, members].sum(axis=1), theta_grid)
+        # sum over the remaining galaxies, not L - l_members: -inf - (-inf) = NaN when a left-out galaxy alone
+        # rules a map out (see exact_pixel_likelihood_chunked.py)
+        keep = np.ones(n_gal, bool)
+        keep[members] = False
+        _, ess_minus[si], p_minus[si] = weights_and_map(loglik[:, keep].sum(axis=1), theta_grid)
 
     np.savez(args.output, p_full=p_full, p_minus=p_minus, influence=p_full[None] - p_minus,
              ess_full=ess_full, ess_minus=ess_minus, set_labels=np.array(labels),
