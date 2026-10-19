@@ -164,8 +164,9 @@ class LOSRedshift:
 
 
 def generate_one_mock_v2(rng, z_mid, dz, zeta, f_host, bsd, los_z, geom, x_gal, y_gal, z_gal, z_end_offset,
-                         n_los):
-    """One mock of the v2 prior. Returns (mask, n_bubbles, hosted, realized_in_slices)."""
+                         n_los, return_bubbles=False):
+    """One mock of the v2 prior. Returns (mask, n_bubbles, hosted, realized_in_slices), plus the spheres
+    (centers (n, 3) cMpc, radii (n,) cMpc) when return_bubbles (for figures; the pipeline does not store them)."""
     # Coordinates (cMpc) are the mock frame of generate_bubble_mocks.py: x, y transverse, z along the line of sight,
     # all centred on the galaxy sample. Larger z = further away = higher redshift.
     n_gal = len(x_gal)
@@ -232,4 +233,6 @@ def generate_one_mock_v2(rng, z_mid, dz, zeta, f_host, bsd, los_z, geom, x_gal, 
     zp = los_z(pts[:, 2])
     sl = np.digitize(zp, Z_SLICES) - 1                      # slice index of every point (-1 / 7 = outside)
     realized = np.array([inside[sl == j].mean() if np.any(sl == j) else np.nan for j in range(len(Z_SLICES) - 1)])
+    if return_bubbles:
+        return mask, len(radii), hosted, realized, centers, radii
     return mask, len(radii), hosted, realized
