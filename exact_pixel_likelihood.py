@@ -82,6 +82,7 @@ sys.modules['lyabubbles'] = _pkg
 from lyabubbles import real_data as rd               # catalog loader, radec_to_comoving
 from lyabubbles import lightcone_field as lf         # bin_z_edges, segments_to_tau, Z_END_DEFAULT
 from lyabubbles.helpers import wave_em, wave_to_dv   # rest-frame grid 1214-1225 A (100 points)
+import los_grid as lgrid                              # sightline bins shared with resample_pencil_pool.py
 
 # Same mapping as real_data_run._EW_MODEL_FLAGS (copied: real_data_run imports dynesty/py21cmfast).
 EW_MODEL_FLAGS = {
@@ -193,19 +194,34 @@ class GalaxyModel:
         T = np.exp(-tau) @ A.T                                # (n_pool, M) IGM transmission
         return ew_int[None, :] * T                            # noiseless observed EW
 
-    def transmission(self, g, theta_g, n_los, n_dv):
+    def sightline_bins(self, g, n_los, los_grid=None):
+        """Redshift edges (z_b, z_e) of galaxy g's sightline bins, nearest the galaxy first. los_grid = None: the
+        n_los equal-width bins of lightcone_field.bin_z_edges (all pools without a grid spec); otherwise the bins of
+        that spec (los_grid.py), over the same galaxy -> z = 5.3 stretch."""
+        c = self.cat
+        if los_grid is None:
+            return lf.bin_z_edges(n_los, c['z_gal'][g], self.d_c0, z_end=lf.Z_END_DEFAULT)
+        if lgrid.n_bins(los_grid) != n_los:
+            raise ValueError(f"grid {los_grid!r} has {lgrid.n_bins(los_grid)} bins, the pool {n_los}")
+        d_c_start = self.d_c0 + c['z_gal'][g]
+        d_c_end = float(Cosmo.comoving_distance(lf.Z_END_DEFAULT).to(u.Mpc).value)
+        z_edges = lf.z_of_comoving_distance(d_c_start - lgrid.bin_edges(los_grid, d_c_start - d_c_end))
+        return z_edges[:-1], z_edges[1:]
+
+    def transmission(self, g, theta_g, n_los, n_dv, los_grid=None):
         """Deterministic version of steps 1-2 for the QUADRATURE likelihood: the IGM x CGM transmission
         T_ik = Int J_k T_CGM exp(-tau_i) dlambda of galaxy g for every pool map i, on n_dv velocity offsets
         at the equal-probability quantiles of the Mason+18 log-normal,
             log10 dv_k = mu_dv(Muv, z0) + 0.24 * Phi^-1((k + 1/2) / n_dv),   k = 0 .. n_dv - 1,
         so that mean_k h(dv_k) is a midpoint-rule integral over the dv distribution (no random noise).
+        los_grid: the pool's sightline grid spec (None = equal-width bins, see sightline_bins).
         Returns T (n_pool, n_dv).
         C and A depend only on (g, n_los, n_dv), not on the pool, so they are computed once per galaxy and
         cached: a pool processed in chunks (exact_pixel_likelihood_chunked.py) does not rebuild them."""
-        key = (g, n_los, n_dv)
+        key = (g, n_los, n_dv, los_grid)
         if key not in self._tr_cache:
             c = self.cat
-            z_b, z_e = lf.bin_z_edges(n_los, c['z_gal'][g], self.d_c0, z_end=lf.Z_END_DEFAULT)
+            z_b, z_e = self.sightline_bins(g, n_los, los_grid)
             C = np.stack([lf.segments_to_tau(z_b[k:k + 1], z_e[k:k + 1], np.ones(1), c['z_gal_red'][g], self.wv)
                           for k in range(n_los)])           # (n_los, n_wave): tau of each bin if neutral
             dv = 10 ** (self.delta_v_func(c['muv'][g], c['z0'])

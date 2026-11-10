@@ -106,15 +106,17 @@ def run_loglik(args):
         n_los = int(d['n_los'])
         if int(d['n_gal']) != n_gal:
             raise ValueError(f"{path} has {int(d['n_gal'])} galaxies, catalog {n_gal}")
+        # sightline grid of the pool (resample_pencil_pool.py); pools without one use equal-width bins
+        los_grid = str(d['los_grid']) if 'los_grid' in d.files else None
         theta = d['theta']
         theta_grid = theta.reshape(len(theta), n_gal, n_los).astype(np.float64)
         ll = np.empty((len(theta), n_gal))
         for g in range(n_gal):
-            T = model.transmission(g, theta_grid[:, g, :], n_los, args.n_dv)
+            T = model.transmission(g, theta_grid[:, g, :], n_los, args.n_dv, los_grid)
             ll[:, g] = epl.loglik_quadrature(T, ew_obs[g], is_ul[g], sigma[g], dists[g], args.n_y)
         tmp = out[:-len('.npz')] + '.tmp.npz'
         np.savez(tmp, loglik=ll, n_gal=n_gal, n_los=n_los, ew_model=args.ew_model, n_dv=args.n_dv,
-                 n_y=args.n_y, pool_file=os.path.basename(path))
+                 n_y=args.n_y, pool_file=os.path.basename(path), los_grid=str(los_grid))
         os.replace(tmp, out)                                 # appears under its final name only when complete
         print(f"[loglik] {os.path.basename(path)}: {len(theta)} maps in {time.perf_counter() - t0:.0f} s "
               f"-> {out}", flush=True)
@@ -142,6 +144,10 @@ def run_combine(args):
     counts = np.array([len(ld['loglik']) for ld in lls])
     loglik = np.concatenate([ld['loglik'] for ld in lls])    # (N, n_gal)
     n_los = int(lls[0]['n_los'])
+    grids = {str(ld['los_grid']) if 'los_grid' in ld.files else 'None' for ld in lls}
+    if len(grids) != 1:
+        raise ValueError(f"loglik files were computed on different sightline grids: {grids}")
+    los_grid = grids.pop()
     N = len(loglik)
     L = loglik.sum(axis=1)
     print(f"[combine] {N} pool maps from {len(files)} files, {n_gal} galaxies, n_los = {n_los}", flush=True)
@@ -228,7 +234,8 @@ def run_combine(args):
                ew_model=args.ew_model, w=W[0], L=L, log_prior_tau=log_prior_tau,
                log_evidence=log_z, log_evidence_err=log_z_err,
                tau_prior=np.array(args.tau_prior if args.tau_prior else [np.nan, np.nan]),
-               pool_files=np.array([os.path.basename(p) for _, p in files]), pool_counts=counts)
+               pool_files=np.array([os.path.basename(p) for _, p in files]), pool_counts=counts,
+               los_grid=los_grid)
     out.update({f'hyper_{k}': v for k, v in hyper.items()})
     np.savez(args.output, **out)
     print(f"[combine] saved {args.output}", flush=True)
